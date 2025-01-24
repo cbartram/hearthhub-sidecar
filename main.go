@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/rest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -19,7 +20,6 @@ const (
 	sourceDir    = "/root/.config/unity3d/IronGate/Valheim"
 	s3BucketName = "hearthhub-backups"
 	backupPrefix = "valheim-backups-auto/"
-	backupFreq   = 10 * time.Minute
 )
 
 func main() {
@@ -44,8 +44,24 @@ func main() {
 		log.Fatalf("unable to load AWS SDK config: %v", err)
 	}
 
+	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
+	var backupFrequencyDuration time.Duration
+
+	if backupFrequency == "" {
+		backupFrequencyDuration = 10 * time.Minute
+	}
+
+	backupFreqInt, err := strconv.Atoi(backupFrequency)
+	if err != nil {
+		log.Errorf("unable to parse BACKUP_FREQUENCY_MIN: %v defaulting to 10 minutes", err)
+		backupFrequencyDuration = 10 * time.Minute
+	} else {
+		backupFrequencyDuration = time.Duration(backupFreqInt) * time.Minute
+	}
+
+	log.Infof("Backup frequency: %v", backupFrequencyDuration)
 	s3Client := s3.NewFromConfig(cfg)
-	ticker := time.NewTicker(backupFreq)
+	ticker := time.NewTicker(backupFrequencyDuration)
 	defer ticker.Stop()
 
 	discordID, err := GetPodLabel("tenant-discord-id")
