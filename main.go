@@ -3,23 +3,22 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"strconv"
+	"syscall"
 	"time"
 )
 
 const (
-	sourceDir    = "/root/.config/unity3d/IronGate/Valheim"
-	s3BucketName = "hearthhub-backups"
-	backupPrefix = "valheim-backups-auto/"
+	sourceDir               = "/root/.config/unity3d/IronGate/Valheim"
+	s3BucketName            = "hearthhub-backups"
+	backupPrefix            = "valheim-backups-auto"
+	gracefulShutdownTimeout = 1 * time.Minute
 )
 
 func main() {
@@ -37,54 +36,26 @@ func main() {
 	log.SetLevel(logLevel)
 
 	log.Info("Starting Valheim server backup sidecar")
-	ctx := context.Background()
 
-	cfg, err := config.LoadDefaultConfig(ctx)
+	backupManager, err := NewBackupManager()
 	if err != nil {
-		log.Fatalf("unable to load AWS SDK config: %v", err)
+		log.Fatalf("Failed to create backup manager: %v", err)
 	}
 
-	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
-	var backupFrequencyDuration time.Duration
+	// Start periodic backups
+	backupManager.Start()
 
-	if backupFrequency == "" {
-		backupFrequencyDuration = 10 * time.Minute
-	}
+	// Set up signal handling for graceful shutdown
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
 
-	backupFreqInt, err := strconv.Atoi(backupFrequency)
-	if err != nil {
-		log.Errorf("unable to parse BACKUP_FREQUENCY_MIN: %v defaulting to 10 minutes", err)
-		backupFrequencyDuration = 10 * time.Minute
-	} else {
-		backupFrequencyDuration = time.Duration(backupFreqInt) * time.Minute
-	}
+	// Wait for shutdown signal
+	<-stopChan
 
-	log.Infof("Backup frequency: %v", backupFrequencyDuration)
-	s3Client := s3.NewFromConfig(cfg)
-	ticker := time.NewTicker(backupFrequencyDuration)
-	defer ticker.Stop()
+	// Perform final backup and cleanup
+	backupManager.GracefulShutdown()
 
-	discordID, err := GetPodLabel("tenant-discord-id")
-	if err != nil {
-		log.Fatalf("Failed to get Discord ID: %v", err)
-	}
-
-	log.Infof("Tenant Discord ID: %s", discordID)
-
-	// Perform an initial backup on server start.
-	err = BackupWorldSaves(ctx, s3Client, discordID)
-	if err != nil {
-		log.Errorf("initial backup failed: %v", err)
-	}
-
-	for {
-		select {
-		case <-ticker.C:
-			if err = BackupWorldSaves(ctx, s3Client, discordID); err != nil {
-				log.Printf("backup failed: %v", err)
-			}
-		}
-	}
+	log.Println("Valheim Backup sidecar shutting down")
 }
 
 // GetPodLabel retrieves a label from a pod given the label key. Returns "" if no label can be found or
@@ -112,40 +83,6 @@ func GetPodLabel(labelKey string) (string, error) {
 	}
 
 	return labelValue, nil
-}
-
-// BackupWorldSaves Persists located *.fwl and *.db files to S3 periodically.
-func BackupWorldSaves(ctx context.Context, s3Client *s3.Client, discordId string) error {
-	files, err := FindWorldFiles(sourceDir)
-	if err != nil {
-		return fmt.Errorf("error finding world files: %v", err)
-	}
-
-	for _, file := range files {
-		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, discordId, filepath.Base(file))
-		fileData, err := os.Open(file)
-		if err != nil {
-			log.Infof("Failed to open file %s: %v", file, err)
-			continue
-		}
-		defer fileData.Close()
-
-		// Upload to S3
-		_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(s3BucketName),
-			Key:    aws.String(s3Key),
-			Body:   fileData,
-		})
-
-		if err != nil {
-			log.Printf("failed to upload backup %s to S3: %v", file, err)
-			continue
-		}
-
-		log.Printf("successfully backed up %s to s3://%s/%s", file, s3BucketName, s3Key)
-	}
-
-	return nil
 }
 
 // FindWorldFiles Recursively locates the *.fwl and *.db files on the PVC.
