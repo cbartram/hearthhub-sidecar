@@ -1,12 +1,12 @@
-package main
+package cmd
 
 import (
 	"context"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	log "github.com/sirupsen/logrus"
+	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,9 +14,15 @@ import (
 	"time"
 )
 
+const (
+	backupPrefix            = "valheim-backups-auto"
+	gracefulShutdownTimeout = 1 * time.Minute
+)
+
 type BackupManager struct {
-	s3Client        *s3.Client
+	s3Client        ObjectStore
 	stopChan        chan struct{}
+	sourceDir       string
 	wg              sync.WaitGroup
 	lastBackupMu    sync.Mutex
 	lastBackupTime  time.Time
@@ -24,15 +30,7 @@ type BackupManager struct {
 	tenantDiscordId string
 }
 
-func NewBackupManager() (*BackupManager, error) {
-	ctx := context.Background()
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("unable to load AWS SDK config: %v", err)
-	}
-
-	s3Client := s3.NewFromConfig(cfg)
-
+func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, sourceDir string) (*BackupManager, error) {
 	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
 	var backupFrequencyDuration time.Duration
 
@@ -50,7 +48,7 @@ func NewBackupManager() (*BackupManager, error) {
 
 	log.Infof("backups occur every: %v", backupFrequencyDuration)
 
-	discordID, err := GetPodLabel("tenant-discord-id")
+	discordID, err := GetPodLabel(clientset, "tenant-discord-id")
 	if err != nil {
 		log.Fatalf("Failed to get Discord ID: %v", err)
 	}
@@ -59,6 +57,7 @@ func NewBackupManager() (*BackupManager, error) {
 
 	return &BackupManager{
 		s3Client:        s3Client,
+		sourceDir:       sourceDir,
 		stopChan:        make(chan struct{}),
 		lastBackupTime:  time.Time{},
 		backupFrequency: backupFrequencyDuration,
@@ -68,7 +67,7 @@ func NewBackupManager() (*BackupManager, error) {
 
 // BackupWorldSaves Persists located *.fwl and *.db files to S3 periodically.
 func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
-	files, err := FindWorldFiles(sourceDir)
+	files, err := FindWorldFiles(bm.sourceDir)
 	if err != nil {
 		return fmt.Errorf("error finding world files: %v", err)
 	}
@@ -83,17 +82,18 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		defer fileData.Close()
 
 		_, err = bm.s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(s3BucketName),
+			Bucket: aws.String(os.Getenv("BUCKET_NAME")),
 			Key:    aws.String(s3Key),
 			Body:   fileData,
 		})
 
 		if err != nil {
-			log.Infof("failed to upload backup %s to S3: %v", file, err)
-			continue
+			// In the event 1 file fails to upload we fail the rest of them.
+			log.Errorf("failed to upload backup %s to S3: %v", file, err)
+			return err
 		}
 
-		log.Infof("successfully backed up %s to s3://%s/%s", file, s3BucketName, s3Key)
+		log.Infof("successfully backed up %s to s3://%s/%s", file, os.Getenv("BUCKET_NAME"), s3Key)
 	}
 
 	return nil
