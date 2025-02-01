@@ -44,7 +44,9 @@ since the filesystem will likely differ.
 ## Cleanup Process
 
 The cleanup process is a configurable process which will purge the latest `MAX_BACKUPS` .fwl and .db file pairs from
-S3. The process will also delete any orphaned .fwl files without a .db pair.
+S3. The process will also delete any orphaned .fwl files without a .db pair. The process uses the `-world {name}` argument
+from the running `valheim` container to determine which backups are viable for deletion. This ensures that even an
+ancient backup for `world-0` won't be purged while the server is running `-world world-1`.
 
 ## Built With
 
