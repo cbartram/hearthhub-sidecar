@@ -27,6 +27,34 @@ func GetPodLabel(clientset kubernetes.Interface, labelKey string) (string, error
 	return labelValue, nil
 }
 
+// GetWorldName Returns the name of the world for this server. This will be used in determining which backups to purge from s3. We want to make sure that
+// if 5 backups get created for world-1 while world-0 has 3 backups that world-0's backups do not get purged just because world-1 has created additional backups.
+// We shouldn't trust cognito for the world name because cognito attributes can be updated without the current server being restarted. i.e. server is running
+// the arg: -world world-1 while cognito got updated with world-2 but the server never scaled/had anything installed to do a refresh.
+func GetWorldName(clientset kubernetes.Interface, discordId string) (string, error) {
+	deployment, err := clientset.AppsV1().Deployments("hearthhub").Get(context.Background(), fmt.Sprintf("valheim-%s", discordId), metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("error retrieving deployment: %v", err)
+	}
+
+	var args []string
+	var worldName string
+	for i, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name == "valheim" {
+			args = deployment.Spec.Template.Spec.Containers[i].Args
+			break
+		}
+	}
+
+	for i, arg := range args {
+		if arg == "-world" {
+			worldName = args[i+1]
+		}
+	}
+
+	return worldName, nil
+}
+
 // FindWorldFiles Recursively locates the *.fwl and *.db files on the PVC.
 func FindWorldFiles(dir string) ([]string, error) {
 	var worldFiles []string

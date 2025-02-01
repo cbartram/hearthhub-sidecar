@@ -35,6 +35,7 @@ type BackupPair struct {
 }
 type BackupManager struct {
 	s3Client         ObjectStore
+	kubeClient       kubernetes.Interface
 	stopChan         chan struct{}
 	sourceDir        string
 	wg               sync.WaitGroup
@@ -85,6 +86,7 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, source
 
 	return &BackupManager{
 		s3Client:         s3Client,
+		kubeClient:       clientset,
 		sourceDir:        sourceDir,
 		stopChan:         make(chan struct{}),
 		lastBackupTime:   time.Time{},
@@ -168,7 +170,13 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		maxBackupsInt = 3
 	}
 
-	log.Infof("deleting the last: %d backups", maxBackupsInt)
+	worldName, err := GetWorldName(bm.kubeClient, bm.tenantDiscordId)
+	if err != nil {
+		log.Errorf("failed to get world name, skipping delete: %v", err)
+		return err
+	}
+
+	log.Infof("running cleanup process for the last: %d backups for world: %s", maxBackupsInt, worldName)
 
 	result, err := bm.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String(os.Getenv("BUCKET_NAME")),
@@ -189,7 +197,8 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		filename := filepath.Base(*obj.Key)
 
 		// Skip if not a backup file
-		if !strings.Contains(filename, "_backup_auto-") {
+		if !strings.Contains(filename, "_backup_auto-") || !strings.Contains(filename, worldName) {
+			log.Infof("skipping: %s", filename)
 			continue
 		}
 

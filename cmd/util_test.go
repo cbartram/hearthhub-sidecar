@@ -1,13 +1,16 @@
 package cmd
 
 import (
-	"os"
-	"path/filepath"
-	"testing"
-
+	"context"
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
 )
 
 func TestGetPodLabel(t *testing.T) {
@@ -150,4 +153,145 @@ func TestFindWorldFilesErrors(t *testing.T) {
 		// Restore permissions so cleanup can succeed
 		os.Chmod(tmpDir, 0755)
 	}
+}
+
+func TestGetWorldName(t *testing.T) {
+	tests := []struct {
+		name        string
+		discordId   string
+		deployment  *appsv1.Deployment
+		wantWorld   string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:      "successful retrieval",
+			discordId: "123456",
+			deployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "valheim-123456",
+					Namespace: "hearthhub",
+				},
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "valheim",
+									Args: []string{"./valheim_server.x86_64", "-name", "foo", "-port", "2456", "-world", "MyWorld", "-port", "2456", "-password", "bar"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantWorld: "MyWorld",
+			wantErr:   false,
+		},
+		{
+			name:      "deployment not found",
+			discordId: "nonexistent",
+			deployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "valheim-different",
+					Namespace: "hearthhub",
+				},
+			},
+			wantWorld:   "",
+			wantErr:     true,
+			errContains: "error retrieving deployment",
+		},
+		{
+			name:      "valheim container not found",
+			discordId: "789012",
+			deployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "valheim-789012",
+					Namespace: "hearthhub",
+				},
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "different-container",
+									Args: []string{"./valheim_server.x86_64", "-name", "foo", "-port", "2456", "-world", "MyWorld", "-port", "2456", "-password", "bar"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantWorld: "",
+			wantErr:   false,
+		},
+		{
+			name:      "world flag not found",
+			discordId: "345678",
+			deployment: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "valheim-345678",
+					Namespace: "hearthhub",
+				},
+				Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "valheim",
+									Args: []string{"-port", "2456"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantWorld: "",
+			wantErr:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a fake clientset and add the test deployment
+			clientset := fake.NewClientset()
+			if tt.deployment != nil {
+				_, err := clientset.AppsV1().Deployments("hearthhub").Create(
+					context.Background(),
+					tt.deployment,
+					metav1.CreateOptions{},
+				)
+				if err != nil {
+					t.Fatalf("error creating test deployment: %v", err)
+				}
+			}
+
+			// Call the function being tested
+			gotWorld, err := GetWorldName(clientset, tt.discordId)
+
+			// Check error cases
+			if tt.wantErr {
+				if err == nil {
+					t.Error("GetWorldName() expected error but got none")
+				} else if tt.errContains != "" && !contains(err.Error(), tt.errContains) {
+					t.Errorf("GetWorldName() error = %v, want error containing %v", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("GetWorldName() unexpected error: %v", err)
+				return
+			}
+
+			// Check the returned world name
+			if gotWorld != tt.wantWorld {
+				t.Errorf("GetWorldName() = %v, want %v", gotWorld, tt.wantWorld)
+			}
+		})
+	}
+}
+
+// Helper function to check if a string contains another string
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }

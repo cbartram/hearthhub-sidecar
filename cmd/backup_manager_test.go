@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/ptr"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -210,6 +211,10 @@ func TestPerformPeriodicCleanup(t *testing.T) {
 				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122346.db")},
 				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122347.fwl")},
 				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122347.db")},
+				// These worlds will be skipped by the cleanup for this server. Even though they are the oldest backups they may
+				// be the newest backups for their respective world and thus shouldn't be deleted
+				{Key: ptr.String("different-world_backup_auto-20250201122341.db")},
+				{Key: ptr.String("different-world_backup_auto-20250201122341.fwl")},
 			},
 		}, nil)
 	mockS3.On("DeleteObject", mock.Anything, mock.Anything).Return(&s3.DeleteObjectOutput{}, nil)
@@ -225,6 +230,24 @@ func TestPerformPeriodicCleanup(t *testing.T) {
 		s3Client:        mockS3,
 		tenantDiscordId: "test-discord-id",
 		sourceDir:       tmpDir,
+		kubeClient: fake.NewClientset(&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "valheim-test-discord-id",
+				Namespace: "hearthhub",
+			},
+			Spec: appsv1.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "valheim",
+								Args: []string{"./valheim_server.x86_64", "-name", "foo", "-port", "2456", "-world", "runewraiths-test-world-3", "-port", "2456", "-password", "bar"},
+							},
+						},
+					},
+				},
+			},
+		}),
 	}
 
 	bm.PerformPeriodicCleanup()
@@ -255,6 +278,24 @@ func TestCleanupOrphans(t *testing.T) {
 	bm := &BackupManager{
 		s3Client:        mockS3,
 		tenantDiscordId: "test-discord-id",
+		kubeClient: fake.NewClientset(&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "valheim-test-discord-id",
+				Namespace: "hearthhub",
+			},
+			Spec: appsv1.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "valheim",
+								Args: []string{"./valheim_server.x86_64", "-name", "foo", "-port", "2456", "-world", "runewraiths-test-world-3", "-port", "2456", "-password", "bar"},
+							},
+						},
+					},
+				},
+			},
+		}),
 	}
 
 	err := bm.Cleanup(context.Background())
