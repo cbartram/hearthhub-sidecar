@@ -29,3 +29,29 @@ func TestPutObject(t *testing.T) {
 	_, err := c.PutObject(context.TODO(), &s3.PutObjectInput{})
 	assert.Nil(t, err)
 }
+
+func TestDeleteObject(t *testing.T) {
+	mockS3 := &MockObjectStore{}
+	mockS3.On("DeleteObject", mock.Anything, mock.Anything).
+		Return(&s3.DeleteObjectOutput{}, nil)
+
+	c := S3Client{
+		BucketName: "foo",
+		client:     mockS3,
+	}
+	_, err := c.DeleteObject(context.TODO(), &s3.DeleteObjectInput{})
+	assert.Nil(t, err)
+}
+
+func TestListObjects(t *testing.T) {
+	mockS3 := &MockObjectStore{}
+	mockS3.On("ListObjectsV2", mock.Anything, mock.Anything).
+		Return(&s3.ListObjectsV2Output{}, nil)
+
+	c := S3Client{
+		BucketName: "foo",
+		client:     mockS3,
+	}
+	_, err := c.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{})
+	assert.Nil(t, err)
+}

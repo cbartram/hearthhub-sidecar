@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"errors"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/ptr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -25,6 +27,16 @@ type MockObjectStore struct {
 func (m *MockObjectStore) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	args := m.Called(ctx, params)
 	return args.Get(0).(*s3.PutObjectOutput), args.Error(1)
+}
+
+func (m *MockObjectStore) DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
+	args := m.Called(ctx, params)
+	return args.Get(0).(*s3.DeleteObjectOutput), args.Error(1)
+}
+
+func (m *MockObjectStore) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	args := m.Called(ctx, params)
+	return args.Get(0).(*s3.ListObjectsV2Output), args.Error(1)
 }
 
 func TestNewBackupManager(t *testing.T) {
@@ -184,6 +196,73 @@ func TestPerformPeriodicBackup(t *testing.T) {
 	mockS3.AssertExpectations(t)
 }
 
+func TestPerformPeriodicCleanup(t *testing.T) {
+	// Setup
+	mockS3 := &MockObjectStore{}
+	mockS3.On("ListObjectsV2", mock.Anything, mock.Anything).
+		Return(&s3.ListObjectsV2Output{
+			Contents: []types.Object{
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122344.fwl")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122344.db")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122345.fwl")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122345.db")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122346.fwl")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122346.db")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122347.fwl")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122347.db")},
+			},
+		}, nil)
+	mockS3.On("DeleteObject", mock.Anything, mock.Anything).Return(&s3.DeleteObjectOutput{}, nil)
+
+	tmpDir := t.TempDir()
+	for _, file := range []string{"runewraiths-test-world-3_backup_auto-20250201122344.fwl", "runewraiths-test-world-3_backup_auto-20250201122344.fwl"} {
+		path := filepath.Join(tmpDir, file)
+		err := os.WriteFile(path, []byte("test data"), 0644)
+		assert.NoError(t, err)
+	}
+
+	bm := &BackupManager{
+		s3Client:        mockS3,
+		tenantDiscordId: "test-discord-id",
+		sourceDir:       tmpDir,
+	}
+
+	bm.PerformPeriodicCleanup()
+
+	assert.False(t, bm.lastCleanupTime.IsZero())
+	mockS3.AssertExpectations(t)
+}
+
+func TestCleanupOrphans(t *testing.T) {
+	mockS3 := &MockObjectStore{}
+	mockS3.On("ListObjectsV2", mock.Anything, mock.Anything).
+		Return(&s3.ListObjectsV2Output{
+			Contents: []types.Object{
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122343.fwl")}, // Old orphaned file
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122344.fwl")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122344.db")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122345.fwl")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122345.db")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122346.fwl")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122346.db")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122347.fwl")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122347.db")},
+				{Key: ptr.String("runewraiths-test-world-3_backup_auto-20250201122348.fwl")}, // New orphaned file
+			},
+		}, nil)
+	mockS3.On("DeleteObject", mock.Anything, mock.Anything).Return(&s3.DeleteObjectOutput{}, nil)
+
+	bm := &BackupManager{
+		s3Client:        mockS3,
+		tenantDiscordId: "test-discord-id",
+	}
+
+	err := bm.Cleanup(context.Background())
+
+	assert.NoError(t, err)
+	mockS3.AssertExpectations(t)
+}
+
 func TestStart(t *testing.T) {
 	mockS3 := &MockObjectStore{}
 	mockS3.On("PutObject", mock.Anything, mock.Anything).
@@ -197,11 +276,12 @@ func TestStart(t *testing.T) {
 	}
 
 	bm := &BackupManager{
-		s3Client:        mockS3,
-		backupFrequency: 100 * time.Millisecond,
-		stopChan:        make(chan struct{}),
-		sourceDir:       tmpDir,
-		tenantDiscordId: "test-discord-id",
+		s3Client:         mockS3,
+		backupFrequency:  100 * time.Millisecond,
+		stopChan:         make(chan struct{}),
+		sourceDir:        tmpDir,
+		tenantDiscordId:  "test-discord-id",
+		cleanupFrequency: 100 * time.Minute,
 	}
 
 	bm.Start()
