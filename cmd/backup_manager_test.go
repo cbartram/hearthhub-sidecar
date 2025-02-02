@@ -317,16 +317,18 @@ func TestStart(t *testing.T) {
 	}
 
 	bm := &BackupManager{
-		s3Client:         mockS3,
-		backupFrequency:  100 * time.Millisecond,
-		stopChan:         make(chan struct{}),
-		sourceDir:        tmpDir,
-		tenantDiscordId:  "test-discord-id",
-		cleanupFrequency: 100 * time.Minute,
+		s3Client:          mockS3,
+		backupFrequency:   100 * time.Millisecond,
+		stopChan:          make(chan struct{}),
+		stopPodStatusChan: make(chan struct{}),
+		sourceDir:         tmpDir,
+		tenantDiscordId:   "test-discord-id",
+		cleanupFrequency:  100 * time.Minute,
 	}
 
 	bm.Start()
-	time.Sleep(150 * time.Millisecond)
+	bm.stopPodStatusChan <- struct{}{}
+	time.Sleep(350 * time.Millisecond)
 	bm.GracefulShutdown()
-	mockS3.AssertNumberOfCalls(t, "PutObject", 2) // One from ticker, one from shutdown
+	mockS3.AssertNumberOfCalls(t, "PutObject", 4) // One from ticker, one from shutdown
 }
