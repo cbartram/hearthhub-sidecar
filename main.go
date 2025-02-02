@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/cbartram/hearthhub-sidecar/cmd"
 	log "github.com/sirupsen/logrus"
@@ -12,6 +13,11 @@ import (
 	"syscall"
 )
 
+// main This sidecar has 2 functions:
+// - Persisting and cleaning up backups of world saves to s3
+// - Publishing messages about server (pod) status
+// Functions are determined at container startup using the `-mode` flag set to either "backup" or "publish".
+// By default the backup functionality is used.
 func main() {
 	logger := log.New()
 	logger.SetFormatter(&log.TextFormatter{
@@ -26,11 +32,6 @@ func main() {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(logLevel)
 
-	cfg, err := config.LoadDefaultConfig(context.Background())
-	if err != nil {
-		log.Fatalf("unable to load AWS SDK config: %v", err)
-	}
-
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Fatalf("error creating in-cluster config: %v", err)
@@ -39,6 +40,57 @@ func main() {
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		log.Fatalf("error creating Kubernetes client: %v", err)
+	}
+
+	var mode, messageType, messagePayload string
+	flag.StringVar(&mode, "mode", "", "Sidecar Mode: backup or publish")
+	flag.StringVar(&messageType, "type", "", "Message type: PostStart, PreStop, or Health")
+	flag.StringVar(&messagePayload, "payload", "", "The json encoded string representing the payload of the message")
+	flag.Parse()
+
+	if mode == "backup" {
+		log.Infof("backup mode specified")
+		StartBackups(clientset)
+	} else if mode == "publish" {
+		log.Infof("publish mode specified")
+		Publish(clientset, messageType, messagePayload)
+	} else {
+		log.Infof("no -mode specified defaulting to: backup")
+		StartBackups(clientset)
+	}
+
+}
+
+// Publish Runs the aqmp publish protocol to send a message about the valheim server to the queue.
+func Publish(clientset *kubernetes.Clientset, messageType, messagePayload string) {
+	discordId, err := cmd.GetPodLabel(clientset, "tenant-discord-id")
+	if err != nil {
+		log.Errorf("failed to get pod label publish failed: %v", err)
+		return
+	}
+
+	rabbit, err := cmd.MakeRabbitMQManager()
+	if err != nil {
+		log.Errorf("failed to make rabbitmq manager: %v", err)
+		return
+	}
+
+	message := &cmd.Message{
+		Type:      messageType,
+		Body:      messagePayload,
+		DiscordId: discordId,
+	}
+	err = rabbit.PublishMessage(message)
+	if err != nil {
+		log.Errorf("failed to publish message: %v", err)
+	}
+}
+
+// StartBackups Starts the backup process to S3.
+func StartBackups(clientset *kubernetes.Clientset) {
+	cfg, err := config.LoadDefaultConfig(context.Background())
+	if err != nil {
+		log.Fatalf("unable to load AWS SDK config: %v", err)
 	}
 
 	log.Info("Starting Valheim server backup sidecar")

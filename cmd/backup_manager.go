@@ -34,18 +34,19 @@ type BackupPair struct {
 	DB  BackupFile
 }
 type BackupManager struct {
-	s3Client         ObjectStore
-	kubeClient       kubernetes.Interface
-	stopChan         chan struct{}
-	sourceDir        string
-	wg               sync.WaitGroup
-	lastBackupMu     sync.Mutex
-	lastBackupTime   time.Time
-	backupFrequency  time.Duration
-	tenantDiscordId  string
-	lastCleanupMu    sync.Mutex
-	lastCleanupTime  time.Time
-	cleanupFrequency time.Duration
+	s3Client          ObjectStore
+	kubeClient        kubernetes.Interface
+	stopChan          chan struct{}
+	stopPodStatusChan chan struct{}
+	sourceDir         string
+	wg                sync.WaitGroup
+	lastBackupMu      sync.Mutex
+	lastBackupTime    time.Time
+	backupFrequency   time.Duration
+	tenantDiscordId   string
+	lastCleanupMu     sync.Mutex
+	lastCleanupTime   time.Time
+	cleanupFrequency  time.Duration
 }
 
 func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, sourceDir string) (*BackupManager, error) {
@@ -85,15 +86,16 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, source
 	log.Infof("tenant id: %s, backups occur every: %v, cleanups occur every: %v", discordID, backupFrequencyDuration, cleanupFrequencyDuration)
 
 	return &BackupManager{
-		s3Client:         s3Client,
-		kubeClient:       clientset,
-		sourceDir:        sourceDir,
-		stopChan:         make(chan struct{}),
-		lastBackupTime:   time.Time{},
-		backupFrequency:  backupFrequencyDuration,
-		tenantDiscordId:  discordID,
-		lastCleanupTime:  time.Time{},
-		cleanupFrequency: backupFrequencyDuration,
+		s3Client:          s3Client,
+		kubeClient:        clientset,
+		sourceDir:         sourceDir,
+		stopChan:          make(chan struct{}),
+		stopPodStatusChan: make(chan struct{}),
+		lastBackupTime:    time.Time{},
+		backupFrequency:   backupFrequencyDuration,
+		tenantDiscordId:   discordID,
+		lastCleanupTime:   time.Time{},
+		cleanupFrequency:  backupFrequencyDuration,
 	}, nil
 }
 
@@ -288,7 +290,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 // to s3 at every tick and start a separate go routine to perform cleanups of those backups every tick. Both
 // go routines share the same channel so that they stop together when the container (server) stops.
 func (bm *BackupManager) Start() {
-	bm.wg.Add(2)
+	bm.wg.Add(3)
 
 	// Backup Goroutine
 	go func() {
@@ -320,6 +322,45 @@ func (bm *BackupManager) Start() {
 				return
 			case <-cleanupTicker.C:
 				bm.PerformPeriodicCleanup()
+			}
+		}
+	}()
+
+	// Pod container status ticker. Checks the current pod to see when both containers are ready
+	// When that event occurs the ticker stops and a message is published to a rabbitMQ queue.
+	go func() {
+		defer bm.wg.Done()
+
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-bm.stopPodStatusChan:
+				return
+			case <-ticker.C:
+				ready := CheckContainerStatus(bm.kubeClient)
+				if ready {
+					rabbit, err := MakeRabbitMQManager()
+					if err != nil {
+						log.Errorf("failed to make rabbitmq manager to send container ready status: %v", err)
+						close(bm.stopPodStatusChan)
+						return
+					}
+
+					err = rabbit.PublishMessage(&Message{
+						Type:      "ContainerReady",
+						Body:      fmt.Sprintf(`{"server": "valheim-%s"}`, bm.tenantDiscordId),
+						DiscordId: bm.tenantDiscordId,
+					})
+
+					if err != nil {
+						log.Errorf("failed to publish pod container status ready message: %v", err)
+					}
+
+					close(bm.stopPodStatusChan)
+					return
+				}
 			}
 		}
 	}()
