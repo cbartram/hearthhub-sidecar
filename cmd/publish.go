@@ -48,7 +48,7 @@ func (rm *RabbitMQManager) PublishMessage(message *Message) error {
 
 	return rm.Channel.Publish(
 		"valheim-server-status", // exchange
-		"#",                     // routing key
+		message.DiscordId,       // routing key
 		false,                   // mandatory
 		false,                   // immediate
 		amqp.Publishing{
