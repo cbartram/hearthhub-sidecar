@@ -331,7 +331,7 @@ func (bm *BackupManager) Start() {
 	go func() {
 		defer bm.wg.Done()
 
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
 		for {
