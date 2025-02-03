@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/cbartram/hearthhub-sidecar/cmd"
 	log "github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"os"
 	"os/signal"
 	"syscall"
@@ -34,18 +36,22 @@ func main() {
 
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		log.Fatalf("error creating in-cluster config: %v", err)
+		log.Printf("could not create in cluster config. Attempting to load local kube config: %v", err.Error())
+		config, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+		if err != nil {
+			log.Fatalf("could not load local kubernetes config: %v", err.Error())
+		}
+		log.Printf("local kube config loaded successfully")
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		log.Fatalf("error creating Kubernetes client: %v", err)
+		log.Errorf("error creating Kubernetes client: %v", err)
 	}
 
-	var mode, messageType, messagePayload string
+	var mode, messageType string
 	flag.StringVar(&mode, "mode", "", "Sidecar Mode: backup or publish")
 	flag.StringVar(&messageType, "type", "", "Message type: PostStart, PreStop, or Health")
-	flag.StringVar(&messagePayload, "payload", "", "The json encoded string representing the payload of the message")
 	flag.Parse()
 
 	if mode == "backup" {
@@ -53,7 +59,7 @@ func main() {
 		StartBackups(clientset)
 	} else if mode == "publish" {
 		log.Infof("publish mode specified")
-		Publish(clientset, messageType, messagePayload)
+		Publish(clientset, messageType)
 	} else {
 		log.Infof("no -mode specified defaulting to: backup")
 		StartBackups(clientset)
@@ -62,7 +68,7 @@ func main() {
 }
 
 // Publish Runs the aqmp publish protocol to send a message about the valheim server to the queue.
-func Publish(clientset *kubernetes.Clientset, messageType, messagePayload string) {
+func Publish(clientset *kubernetes.Clientset, messageType string) {
 	discordId, err := cmd.GetPodLabel(clientset, "tenant-discord-id")
 	if err != nil {
 		log.Errorf("failed to get pod label publish failed: %v", err)
@@ -75,15 +81,21 @@ func Publish(clientset *kubernetes.Clientset, messageType, messagePayload string
 		return
 	}
 
+	if messageType != "PostStart" && messageType != "PreStop" {
+		log.Errorf("invalid message type: %s", messageType)
+		return
+	}
+
 	message := &cmd.Message{
 		Type:      messageType,
-		Body:      messagePayload,
+		Body:      fmt.Sprintf(`{"server": "valheim-%s"}`, discordId),
 		DiscordId: discordId,
 	}
 	err = rabbit.PublishMessage(message)
 	if err != nil {
 		log.Errorf("failed to publish message: %v", err)
 	}
+	log.Infof("%s message published successfully", messageType)
 }
 
 // StartBackups Starts the backup process to S3.
