@@ -350,7 +350,7 @@ func (bm *BackupManager) Start() {
 
 					err = rabbit.PublishMessage(&Message{
 						Type:      "ContainerReady",
-						Body:      fmt.Sprintf(`{"server": "valheim-%s"}`, bm.tenantDiscordId),
+						Body:      fmt.Sprintf(`{"containerName": "valheim-%s", containerType: "server"}`, bm.tenantDiscordId),
 						DiscordId: bm.tenantDiscordId,
 					})
 
