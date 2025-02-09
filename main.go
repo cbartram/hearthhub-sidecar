@@ -86,9 +86,11 @@ func Publish(clientset *kubernetes.Clientset, messageType string) {
 		return
 	}
 
+	// "operation" here is simply included to keep consistency with file-manager rabbitmq messages
+	// it doesn't contain any context about what event occurred for this message.
 	message := &cmd.Message{
 		Type:      messageType,
-		Body:      fmt.Sprintf(`{"server": "valheim-%s"}`, discordId),
+		Body:      fmt.Sprintf(`{"containerName": "valheim-%s", "containerType": "server", "operation": ""}`, discordId),
 		DiscordId: discordId,
 	}
 	err = rabbit.PublishMessage(message)
