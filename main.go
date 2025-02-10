@@ -34,35 +34,36 @@ func main() {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(logLevel)
 
-	config, err := rest.InClusterConfig()
+	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
 		log.Printf("could not create in cluster config. Attempting to load local kube config: %v", err.Error())
-		config, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+		kubeConfig, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
 		if err != nil {
 			log.Fatalf("could not load local kubernetes config: %v", err.Error())
 		}
 		log.Printf("local kube config loaded successfully")
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
 		log.Errorf("error creating Kubernetes client: %v", err)
 	}
 
-	var mode, messageType string
+	var mode, messageType, token string
 	flag.StringVar(&mode, "mode", "", "Sidecar Mode: backup or publish")
+	flag.StringVar(&token, "token", "", "Tenant refresh token")
 	flag.StringVar(&messageType, "type", "", "Message type: PostStart, PreStop, or Health")
 	flag.Parse()
 
 	if mode == "backup" {
 		log.Infof("backup mode specified")
-		StartBackups(clientset)
+		StartBackups(clientset, token)
 	} else if mode == "publish" {
 		log.Infof("publish mode specified")
 		Publish(clientset, messageType)
 	} else {
 		log.Infof("no -mode specified defaulting to: backup")
-		StartBackups(clientset)
+		StartBackups(clientset, token)
 	}
 
 }
@@ -101,7 +102,7 @@ func Publish(clientset *kubernetes.Clientset, messageType string) {
 }
 
 // StartBackups Starts the backup process to S3.
-func StartBackups(clientset *kubernetes.Clientset) {
+func StartBackups(clientset *kubernetes.Clientset, token string) {
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		log.Fatalf("unable to load AWS SDK config: %v", err)
@@ -110,7 +111,9 @@ func StartBackups(clientset *kubernetes.Clientset) {
 	log.Info("Starting Valheim server backup sidecar")
 
 	s3Client := cmd.MakeS3Client(cfg)
-	backupManager, err := cmd.NewBackupManager(s3Client, clientset, "/root/.config/unity3d/IronGate/Valheim")
+	cognito := cmd.MakeCognitoService(cfg)
+
+	backupManager, err := cmd.NewBackupManager(s3Client, clientset, cognito, token, "/root/.config/unity3d/IronGate/Valheim")
 	if err != nil {
 		log.Fatalf("Failed to create backup manager: %v", err)
 	}

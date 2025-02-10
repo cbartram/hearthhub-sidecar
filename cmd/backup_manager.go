@@ -36,6 +36,8 @@ type BackupPair struct {
 type BackupManager struct {
 	s3Client          ObjectStore
 	kubeClient        kubernetes.Interface
+	cognito           CognitoService
+	token             string
 	stopChan          chan struct{}
 	stopPodStatusChan chan struct{}
 	sourceDir         string
@@ -49,7 +51,7 @@ type BackupManager struct {
 	cleanupFrequency  time.Duration
 }
 
-func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, sourceDir string) (*BackupManager, error) {
+func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognito CognitoService, token, sourceDir string) (*BackupManager, error) {
 	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
 	cleanupFrequency := os.Getenv("CLEANUP_FREQUENCY_MIN")
 	var backupFrequencyDuration, cleanupFrequencyDuration time.Duration
@@ -88,6 +90,8 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, source
 	return &BackupManager{
 		s3Client:          s3Client,
 		kubeClient:        clientset,
+		cognito:           cognito,
+		token:             token,
 		sourceDir:         sourceDir,
 		stopChan:          make(chan struct{}),
 		stopPodStatusChan: make(chan struct{}),
@@ -106,6 +110,11 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		return fmt.Errorf("error finding world files: %v", err)
 	}
 
+	user, err := bm.cognito.AuthUser(ctx, &bm.token, &bm.tenantDiscordId)
+	if err != nil {
+		return fmt.Errorf("error authenticating user: %v", err)
+	}
+	var dbFiles []string
 	for _, file := range files {
 		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.tenantDiscordId, filepath.Base(file))
 		fileData, err := os.Open(file)
@@ -114,6 +123,10 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 			continue
 		}
 		defer fileData.Close()
+
+		if strings.HasSuffix(filepath.Base(file), ".db") {
+			dbFiles = append(dbFiles, filepath.Base(file))
+		}
 
 		_, err = bm.s3Client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(os.Getenv("BUCKET_NAME")),
@@ -128,6 +141,13 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		}
 
 		log.Infof("successfully backed up %s to s3://%s/%s", file, os.Getenv("BUCKET_NAME"), s3Key)
+	}
+
+	// Finally update cognito with the fact that the user now has n files backed up from their pvc. i.e. the files
+	// are already installed on the pvc
+	err = bm.cognito.MergeInstalledFilesBatch(ctx, user, dbFiles)
+	if err != nil {
+		log.Errorf("failed to merge installed files: %v", err)
 	}
 
 	return nil
