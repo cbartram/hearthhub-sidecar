@@ -91,7 +91,7 @@ func (c *CognitoServiceImpl) MergeInstalledFilesBatch(ctx context.Context, user 
 	}
 
 	for _, attribute := range attributes {
-		if *attribute.Name == "custom:installed_files" {
+		if *attribute.Name == "custom:installed_backups" {
 			// Deserialize the json string value of the attribute into a struct
 			err := json.Unmarshal([]byte(*attribute.Value), &installedFiles)
 			if err != nil {
@@ -145,7 +145,7 @@ func (c *CognitoServiceImpl) MergeInstalledFilesBatch(ctx context.Context, user 
 	mergedByte, _ := json.Marshal(mergedFiles)
 	mergedStr := string(mergedByte)
 	attr := types.AttributeType{
-		Name:  aws.String("custom:installed_files"),
+		Name:  aws.String("custom:installed_backups"),
 		Value: &mergedStr,
 	}
 
