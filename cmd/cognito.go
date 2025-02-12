@@ -82,8 +82,7 @@ func MakeCognitoSecretHash(userId, clientId, clientSecret string) string {
 // MergeInstalledFilesBatch Updates a users attribute called: custom:installed_files by merging the existing
 // state with any new backup files that were just installed on the PVC.
 func (c *CognitoServiceImpl) MergeInstalledFilesBatch(ctx context.Context, user *CognitoUser, fileNames []string) error {
-	var installedFiles []InstalledFile
-
+	var installedFiles map[string]bool
 	attributes, err := c.GetUserAttributes(ctx, &user.Credentials.AccessToken)
 	if err != nil {
 		log.Errorf("failed to get user attributes: %v", err)
@@ -104,45 +103,15 @@ func (c *CognitoServiceImpl) MergeInstalledFilesBatch(ctx context.Context, user 
 
 	log.Infof("files before: %v", installedFiles)
 
-	var mergedFiles []InstalledFile
-	foundFile := false
-
-	// for each .db file, search through the user's installed file attributes for a match
-	// if a match is found update installed to true since the file was located on the pvc and it is installed
-	// if no match is found create a new entry in the users installed files and set installed to true
+	// for each .db file, insert or update the user's installed_backups attribute with
+	// a true value for the file since it was found on the pvc. "fileNames" is the list of backup files directly from the
+	// pvc.
 	for _, fileName := range fileNames {
-		for _, userFile := range installedFiles {
-			// case 2 and 3: mod already exists in the list (it's been installed before), toggle its value accordingly
-			if userFile.Name == fileName {
-				log.Infof("file %s already exists in user attributes", userFile.Name)
-
-				// Backups are always write operation i.e. the file is always installed on the pvc since it was found on the pvc.
-				mergedFiles = append(mergedFiles, InstalledFile{
-					Name:      userFile.Name,
-					Installed: true,
-				})
-
-				foundFile = true
-			} else {
-				// Leave other installed mods alone
-				mergedFiles = append(mergedFiles, userFile)
-			}
-		}
-		// case 1: Mod does not exist in the list (it's the first time installing)
-		if !foundFile {
-			log.Infof("file %s not found in user attributes, first time install", fileName)
-			mergedFiles = append(mergedFiles, InstalledFile{
-				Name:      fileName,
-				Installed: true,
-			})
-		} else {
-			// Reset to false for the next iteration to avoid duplicates
-			foundFile = false
-		}
+		installedFiles[fileName] = true
 	}
 
 	// Serialize the installed mods to json
-	mergedByte, _ := json.Marshal(mergedFiles)
+	mergedByte, _ := json.Marshal(installedFiles)
 	mergedStr := string(mergedByte)
 	attr := types.AttributeType{
 		Name:  aws.String("custom:installed_backups"),
