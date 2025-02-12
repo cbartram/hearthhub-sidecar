@@ -45,7 +45,7 @@ type BackupManager struct {
 	lastBackupMu      sync.Mutex
 	lastBackupTime    time.Time
 	backupFrequency   time.Duration
-	tenantDiscordId   string
+	TenantDiscordId   string
 	lastCleanupMu     sync.Mutex
 	lastCleanupTime   time.Time
 	cleanupFrequency  time.Duration
@@ -97,7 +97,7 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognit
 		stopPodStatusChan: make(chan struct{}),
 		lastBackupTime:    time.Time{},
 		backupFrequency:   backupFrequencyDuration,
-		tenantDiscordId:   discordID,
+		TenantDiscordId:   discordID,
 		lastCleanupTime:   time.Time{},
 		cleanupFrequency:  backupFrequencyDuration,
 	}, nil
@@ -110,13 +110,13 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		return fmt.Errorf("error finding world files: %v", err)
 	}
 
-	user, err := bm.cognito.AuthUser(ctx, &bm.token, &bm.tenantDiscordId)
+	user, err := bm.cognito.AuthUser(ctx, &bm.token, &bm.TenantDiscordId)
 	if err != nil {
 		return fmt.Errorf("error authenticating user: %v", err)
 	}
 	var dbFiles []string
 	for _, file := range files {
-		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.tenantDiscordId, filepath.Base(file))
+		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, filepath.Base(file))
 		fileData, err := os.Open(file)
 		if err != nil {
 			log.Infof("Failed to open file %s: %v", file, err)
@@ -192,7 +192,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		maxBackupsInt = 3
 	}
 
-	worldName, err := GetWorldName(bm.kubeClient, bm.tenantDiscordId)
+	worldName, err := GetWorldName(bm.kubeClient, bm.TenantDiscordId)
 	if err != nil {
 		log.Errorf("failed to get world name, skipping delete: %v", err)
 		return err
@@ -202,7 +202,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 
 	result, err := bm.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String(os.Getenv("BUCKET_NAME")),
-		Prefix: aws.String(fmt.Sprintf("%s/%s/", backupPrefix, bm.tenantDiscordId)),
+		Prefix: aws.String(fmt.Sprintf("%s/%s/", backupPrefix, bm.TenantDiscordId)),
 	})
 
 	if err != nil {
@@ -310,6 +310,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 // to s3 at every tick and start a separate go routine to perform cleanups of those backups every tick. Both
 // go routines share the same channel so that they stop together when the container (server) stops.
 func (bm *BackupManager) Start() {
+	log.Infof("starting backup manager go-routines")
 	bm.wg.Add(3)
 
 	// Backup Goroutine
@@ -324,6 +325,7 @@ func (bm *BackupManager) Start() {
 			case <-bm.stopChan:
 				return
 			case <-ticker.C:
+				log.Infof("performing periodic s3 backup")
 				bm.PerformPeriodicBackup()
 			}
 		}
@@ -341,6 +343,7 @@ func (bm *BackupManager) Start() {
 			case <-bm.stopChan:
 				return
 			case <-cleanupTicker.C:
+				log.Infof("performing periodic s3 cleanup")
 				bm.PerformPeriodicCleanup()
 			}
 		}
@@ -370,8 +373,8 @@ func (bm *BackupManager) Start() {
 
 					err = rabbit.PublishMessage(&Message{
 						Type:      "ContainerReady",
-						Body:      fmt.Sprintf(`{"containerName": "valheim-%s", "containerType": "server", "operation": ""}`, bm.tenantDiscordId),
-						DiscordId: bm.tenantDiscordId,
+						Body:      fmt.Sprintf(`{"containerName": "valheim-%s", "containerType": "server", "operation": ""}`, bm.TenantDiscordId),
+						DiscordId: bm.TenantDiscordId,
 					})
 
 					if err != nil {

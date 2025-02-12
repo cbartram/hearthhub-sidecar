@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
 	"os"
 	"os/signal"
 	"syscall"
@@ -49,6 +50,11 @@ func main() {
 		log.Errorf("error creating Kubernetes client: %v", err)
 	}
 
+	metricsClient, err := metrics.NewForConfig(kubeConfig)
+	if err != nil {
+		log.Errorf("error creating Metrics client: %v", err)
+	}
+
 	var mode, messageType, token string
 	flag.StringVar(&mode, "mode", "", "Sidecar Mode: backup or publish")
 	flag.StringVar(&token, "token", "", "Tenant refresh token")
@@ -57,13 +63,13 @@ func main() {
 
 	if mode == "backup" {
 		log.Infof("backup mode specified")
-		StartBackups(clientset, token)
+		StartBackups(clientset, metricsClient, token)
 	} else if mode == "publish" {
 		log.Infof("publish mode specified")
 		Publish(clientset, messageType)
 	} else {
 		log.Infof("no -mode specified defaulting to: backup")
-		StartBackups(clientset, token)
+		StartBackups(clientset, metricsClient, token)
 	}
 
 }
@@ -102,7 +108,7 @@ func Publish(clientset *kubernetes.Clientset, messageType string) {
 }
 
 // StartBackups Starts the backup process to S3.
-func StartBackups(clientset *kubernetes.Clientset, token string) {
+func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Clientset, token string) {
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		log.Fatalf("unable to load AWS SDK config: %v", err)
@@ -118,10 +124,16 @@ func StartBackups(clientset *kubernetes.Clientset, token string) {
 		log.Fatalf("Failed to create backup manager: %v", err)
 	}
 
-	// Start periodic backups
+	collector, err := cmd.MakeMetricsCollector(clientset, metricsClient, backupManager.TenantDiscordId)
+	if err != nil {
+		log.Errorf("failed to make metrics collector: %v", err)
+		return
+	}
+
+	log.Infof("starting metrics collection job")
+	collector.StartCollection()
 	backupManager.Start()
 
-	// Set up signal handling for graceful shutdown
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
 
