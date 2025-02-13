@@ -10,6 +10,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -104,8 +105,10 @@ func (f *FileWatcher) watchFile(path string, joinCodes chan<- string) error {
 			if event.Op&fsnotify.Write == fsnotify.Write {
 				for scanner.Scan() {
 					line := scanner.Text()
-					if strings.Contains(line, "Join Code") {
-						joinCodes <- line
+					if strings.Contains(line, "with join code") {
+						// Join code line will be: Session "<server-name>" registered with join code <6 digit code>
+						// and then: Session "<server-name>" with join code <6 digit code> and IP <IP>:<PORT> is active with 0 player(s)
+						joinCodes <- parseJoinCode(line)
 					}
 				}
 			}
@@ -115,4 +118,17 @@ func (f *FileWatcher) watchFile(path string, joinCodes chan<- string) error {
 			}
 		}
 	}
+}
+
+func parseJoinCode(input string) string {
+	pattern := `join code (\d+)`
+	re := regexp.MustCompile(pattern)
+	match := re.FindStringSubmatch(input)
+
+	if len(match) > 1 {
+		// Return the captured group (the numbers after "join code")
+		return strings.TrimSpace(match[1])
+	}
+
+	return "not-found"
 }
