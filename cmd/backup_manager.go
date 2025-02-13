@@ -389,6 +389,10 @@ func (bm *BackupManager) Start() {
 						DiscordId: bm.TenantDiscordId,
 					})
 
+					if err != nil {
+						log.Errorf("failed to publish join code message: %v", err)
+					}
+
 					// Notifies the frontend that it can move the server status to ready
 					err = rabbit.PublishMessage(&Message{
 						Type:      "ContainerReady",
@@ -400,9 +404,9 @@ func (bm *BackupManager) Start() {
 						log.Errorf("failed to publish pod container status ready message: %v", err)
 					}
 
-					rabbit.Channel.Close()
+					log.Infof("sent rabbitmq messages")
+					defer rabbit.Channel.Close()
 					close(bm.stopPodStatusChan)
-					return
 				}
 			}
 		}

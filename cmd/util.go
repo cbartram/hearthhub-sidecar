@@ -32,7 +32,6 @@ func GetPodLabel(clientset kubernetes.Interface, labelKey string) (string, error
 // when all containers in a pod are ready and false otherwise.
 func CheckContainerStatus(clientset kubernetes.Interface) bool {
 	podName := os.Getenv("HOSTNAME")
-	log.Infof("Polling for container status: %s", podName)
 	pod, err := clientset.CoreV1().Pods("hearthhub").Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
 		log.Errorf("error getting pod status: %v", err)
@@ -47,7 +46,7 @@ func CheckContainerStatus(clientset kubernetes.Interface) bool {
 		}
 	}
 
-	log.Infof("container status: %d/%d ready", readyCount, expectedCount)
+	log.Infof("%d/%d containers ready", readyCount, expectedCount)
 	return readyCount == expectedCount
 }
 
