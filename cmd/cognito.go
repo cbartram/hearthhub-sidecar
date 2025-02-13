@@ -82,7 +82,7 @@ func MakeCognitoSecretHash(userId, clientId, clientSecret string) string {
 // MergeInstalledFilesBatch Updates a users attribute called: custom:installed_files by merging the existing
 // state with any new backup files that were just installed on the PVC.
 func (c *CognitoServiceImpl) MergeInstalledFilesBatch(ctx context.Context, user *CognitoUser, fileNames []string) error {
-	var installedFiles map[string]bool
+	installedFiles := make(map[string]bool)
 	attributes, err := c.GetUserAttributes(ctx, &user.Credentials.AccessToken)
 	if err != nil {
 		log.Errorf("failed to get user attributes: %v", err)
@@ -107,18 +107,23 @@ func (c *CognitoServiceImpl) MergeInstalledFilesBatch(ctx context.Context, user 
 	// a true value for the file since it was found on the pvc. "fileNames" is the list of backup files directly from the
 	// pvc.
 	for _, fileName := range fileNames {
+		log.Infof("merging file: %s", fileName)
 		installedFiles[fileName] = true
 	}
 
 	// Serialize the installed mods to json
-	mergedByte, _ := json.Marshal(installedFiles)
-	mergedStr := string(mergedByte)
-	attr := types.AttributeType{
-		Name:  aws.String("custom:installed_backups"),
-		Value: &mergedStr,
+	mergedBytes, err := json.Marshal(installedFiles)
+	if err != nil {
+		log.Errorf("failed to marshal installed files: %v", err)
+		return err
 	}
 
-	log.Infof("merged files after: %s", mergedStr)
+	attr := types.AttributeType{
+		Name:  aws.String("custom:installed_backups"),
+		Value: aws.String(string(mergedBytes)),
+	}
+
+	log.Infof("merged files after: %v", installedFiles)
 	err = c.UpdateUserAttributes(ctx, &user.Credentials.AccessToken, []types.AttributeType{attr})
 	if err != nil {
 		log.Errorf("failed to update user attributes: %v", err)

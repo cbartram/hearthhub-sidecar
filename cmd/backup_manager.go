@@ -145,6 +145,7 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 
 	// Finally update cognito with the fact that the user now has n files backed up from their pvc. i.e. the files
 	// are already installed on the pvc
+	log.Infof("merging: %d synced s3 backup files with cognito user attributes", len(dbFiles))
 	err = bm.cognito.MergeInstalledFilesBatch(ctx, user, dbFiles)
 	if err != nil {
 		log.Errorf("failed to merge installed files: %v", err)
