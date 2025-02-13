@@ -130,17 +130,21 @@ func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Client
 		return
 	}
 
-	log.Infof("starting metrics collection job")
+	watcher, err := cmd.MakeFileWatcher()
+	if err != nil {
+		log.Errorf("failed to make watcher: %v", err)
+		return
+	}
+
+	watcher.Start("/valheim/BepInEx/config/server-logs.txt", backupManager.TenantDiscordId)
 	collector.StartCollection()
 	backupManager.Start()
 
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Wait for shutdown signal
 	<-stopChan
 
-	// Perform final backup and cleanup
 	backupManager.GracefulShutdown()
 
 	log.Println("Valheim Backup sidecar shutting down")
