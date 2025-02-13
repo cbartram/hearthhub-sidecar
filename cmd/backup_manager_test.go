@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go/ptr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -97,11 +98,15 @@ func TestNewBackupManager(t *testing.T) {
 					},
 				},
 			})
+
+			cfg := aws.NewConfig()
+			mockCognito := MakeCognitoService(*cfg)
+
 			tt.setupMocks(mockK8s)
 
 			tmpDir := t.TempDir()
 
-			bm, err := NewBackupManager(&S3Client{}, mockK8s, tmpDir)
+			bm, err := NewBackupManager(&S3Client{}, mockK8s, mockCognito, "token", tmpDir)
 			if tt.expectedError {
 				assert.Error(t, err)
 				assert.Nil(t, bm)
@@ -109,7 +114,7 @@ func TestNewBackupManager(t *testing.T) {
 				assert.NoError(t, err)
 				assert.NotNil(t, bm)
 				assert.Equal(t, tt.expectedFreq, bm.backupFrequency)
-				assert.Equal(t, tt.discordID, bm.tenantDiscordId)
+				assert.Equal(t, tt.discordID, bm.TenantDiscordId)
 			}
 		})
 	}
@@ -156,7 +161,7 @@ func TestBackupWorldSaves(t *testing.T) {
 
 			bm := &BackupManager{
 				s3Client:        mockS3,
-				tenantDiscordId: "test-discord-id",
+				TenantDiscordId: "test-discord-id",
 				sourceDir:       tmpDir,
 			}
 
@@ -187,7 +192,7 @@ func TestPerformPeriodicBackup(t *testing.T) {
 
 	bm := &BackupManager{
 		s3Client:        mockS3,
-		tenantDiscordId: "test-discord-id",
+		TenantDiscordId: "test-discord-id",
 		sourceDir:       tmpDir,
 	}
 
@@ -228,7 +233,7 @@ func TestPerformPeriodicCleanup(t *testing.T) {
 
 	bm := &BackupManager{
 		s3Client:        mockS3,
-		tenantDiscordId: "test-discord-id",
+		TenantDiscordId: "test-discord-id",
 		sourceDir:       tmpDir,
 		kubeClient: fake.NewClientset(&appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{
@@ -277,7 +282,7 @@ func TestCleanupOrphans(t *testing.T) {
 
 	bm := &BackupManager{
 		s3Client:        mockS3,
-		tenantDiscordId: "test-discord-id",
+		TenantDiscordId: "test-discord-id",
 		kubeClient: fake.NewClientset(&appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "valheim-test-discord-id",
@@ -322,7 +327,7 @@ func TestStart(t *testing.T) {
 		stopChan:          make(chan struct{}),
 		stopPodStatusChan: make(chan struct{}),
 		sourceDir:         tmpDir,
-		tenantDiscordId:   "test-discord-id",
+		TenantDiscordId:   "test-discord-id",
 		cleanupFrequency:  100 * time.Minute,
 	}
 

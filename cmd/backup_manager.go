@@ -221,7 +221,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 
 		// Skip if not a backup file
 		if !strings.Contains(filename, "_backup_auto-") || !strings.Contains(filename, worldName) {
-			log.Infof("skipping: %s", filename)
+			log.Infof("skipping (either not backup or not matching world as running server): %s", filename)
 			continue
 		}
 

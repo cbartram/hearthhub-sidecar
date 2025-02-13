@@ -8,6 +8,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // GetPodLabel retrieves a label from a pod given the label key. Returns "" if no label can be found or
@@ -60,19 +61,25 @@ func GetWorldName(clientset kubernetes.Interface, discordId string) (string, err
 		return "", fmt.Errorf("error retrieving deployment: %v", err)
 	}
 
-	var args []string
-	var worldName string
-	for i, container := range deployment.Spec.Template.Spec.Containers {
+	var args string
+	for _, container := range deployment.Spec.Template.Spec.Containers {
 		if container.Name == "valheim" {
-			args = deployment.Spec.Template.Spec.Containers[i].Args
+			args = strings.Join(container.Args, " ")
 			break
 		}
 	}
 
-	for i, arg := range args {
-		if arg == "-world" {
-			worldName = args[i+1]
+	worldName := ""
+	parts := strings.Fields(args)
+	for i, part := range parts {
+		if part == "-world" && i+1 < len(parts) {
+			worldName = parts[i+1]
+			break
 		}
+	}
+
+	if worldName == "" {
+		return "", fmt.Errorf("world name not found in args")
 	}
 
 	return worldName, nil

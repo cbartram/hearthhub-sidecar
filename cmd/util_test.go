@@ -178,7 +178,7 @@ func TestGetWorldName(t *testing.T) {
 							Containers: []corev1.Container{
 								{
 									Name: "valheim",
-									Args: []string{"./valheim_server.x86_64", "-name", "foo", "-port", "2456", "-world", "MyWorld", "-port", "2456", "-password", "bar"},
+									Args: []string{"./valheim_server.x86_64 -name foo -port 2456 -world MyWorld -port 2456 -password bar"},
 								},
 							},
 						},
@@ -215,7 +215,7 @@ func TestGetWorldName(t *testing.T) {
 							Containers: []corev1.Container{
 								{
 									Name: "different-container",
-									Args: []string{"./valheim_server.x86_64", "-name", "foo", "-port", "2456", "-world", "MyWorld", "-port", "2456", "-password", "bar"},
+									Args: []string{"./valheim_server.x86_64 -name foo -port 2456 -world MyWorld -port 2456 -password bar"},
 								},
 							},
 						},
@@ -223,7 +223,7 @@ func TestGetWorldName(t *testing.T) {
 				},
 			},
 			wantWorld: "",
-			wantErr:   false,
+			wantErr:   true,
 		},
 		{
 			name:      "world flag not found",
@@ -239,7 +239,7 @@ func TestGetWorldName(t *testing.T) {
 							Containers: []corev1.Container{
 								{
 									Name: "valheim",
-									Args: []string{"-port", "2456"},
+									Args: []string{"-port 2456"},
 								},
 							},
 						},
@@ -247,7 +247,7 @@ func TestGetWorldName(t *testing.T) {
 				},
 			},
 			wantWorld: "",
-			wantErr:   false,
+			wantErr:   true,
 		},
 	}
 
