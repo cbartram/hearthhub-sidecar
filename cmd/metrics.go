@@ -43,13 +43,7 @@ type MetricsCollector struct {
 	collectionFrequency time.Duration
 }
 
-func MakeMetricsCollector(kubeClient kubernetes.Interface, metricsClient *metrics.Clientset, discordId string) (*MetricsCollector, error) {
-	rabbit, err := MakeRabbitMQManager()
-	if err != nil {
-		log.Errorf("failed to make rabbitmq manager: %v", err)
-		return nil, errors.Wrap(err, "failed to make rabbitmq manager")
-	}
-
+func MakeMetricsCollector(kubeClient kubernetes.Interface, metricsClient *metrics.Clientset, rabbit *RabbitMQManager, discordId string) (*MetricsCollector, error) {
 	return &MetricsCollector{
 		rabbitMqManager:     rabbit,
 		kubeClient:          kubeClient,

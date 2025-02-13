@@ -55,6 +55,15 @@ func main() {
 		log.Errorf("error creating Metrics client: %v", err)
 	}
 
+	// Ensure only 1 instance of this exists for all go routines because they are all coming from the same ip (this pod).
+	// This holds a reference to a channel to publish messages and all messages must be published on this channel.
+	// Trying to open other channels will result in no message being sent and no errors being thrown.
+	rabbit, err := cmd.MakeRabbitMQManager()
+	if err != nil {
+		log.Errorf("failed to make rabbitmq manager: %v", err)
+		return
+	}
+
 	var mode, messageType, token string
 	flag.StringVar(&mode, "mode", "", "Sidecar Mode: backup or publish")
 	flag.StringVar(&token, "token", "", "Tenant refresh token")
@@ -63,28 +72,22 @@ func main() {
 
 	if mode == "backup" {
 		log.Infof("backup mode specified")
-		StartBackups(clientset, metricsClient, token)
+		StartBackups(clientset, metricsClient, rabbit, token)
 	} else if mode == "publish" {
 		log.Infof("publish mode specified")
-		Publish(clientset, messageType)
+		Publish(clientset, rabbit, messageType)
 	} else {
 		log.Infof("no -mode specified defaulting to: backup")
-		StartBackups(clientset, metricsClient, token)
+		StartBackups(clientset, metricsClient, rabbit, token)
 	}
 
 }
 
 // Publish Runs the aqmp publish protocol to send a message about the valheim server to the queue.
-func Publish(clientset *kubernetes.Clientset, messageType string) {
+func Publish(clientset *kubernetes.Clientset, rabbit *cmd.RabbitMQManager, messageType string) {
 	discordId, err := cmd.GetPodLabel(clientset, "tenant-discord-id")
 	if err != nil {
 		log.Errorf("failed to get pod label publish failed: %v", err)
-		return
-	}
-
-	rabbit, err := cmd.MakeRabbitMQManager()
-	if err != nil {
-		log.Errorf("failed to make rabbitmq manager: %v", err)
 		return
 	}
 
@@ -108,7 +111,7 @@ func Publish(clientset *kubernetes.Clientset, messageType string) {
 }
 
 // StartBackups Starts the backup process to S3.
-func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Clientset, token string) {
+func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Clientset, rabbit *cmd.RabbitMQManager, token string) {
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		log.Fatalf("unable to load AWS SDK config: %v", err)
@@ -119,12 +122,12 @@ func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Client
 	s3Client := cmd.MakeS3Client(cfg)
 	cognito := cmd.MakeCognitoService(cfg)
 
-	backupManager, err := cmd.NewBackupManager(s3Client, clientset, cognito, token, "/root/.config/unity3d/IronGate/Valheim")
+	backupManager, err := cmd.NewBackupManager(s3Client, clientset, cognito, rabbit, token, "/root/.config/unity3d/IronGate/Valheim/worlds_local")
 	if err != nil {
 		log.Fatalf("Failed to create backup manager: %v", err)
 	}
 
-	collector, err := cmd.MakeMetricsCollector(clientset, metricsClient, backupManager.TenantDiscordId)
+	collector, err := cmd.MakeMetricsCollector(clientset, metricsClient, rabbit, backupManager.TenantDiscordId)
 	if err != nil {
 		log.Errorf("failed to make metrics collector: %v", err)
 		return

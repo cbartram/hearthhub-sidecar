@@ -39,6 +39,7 @@ type BackupManager struct {
 	s3Client          ObjectStore
 	kubeClient        kubernetes.Interface
 	cognito           CognitoService
+	rabbitMQManager   *RabbitMQManager
 	token             string
 	stopChan          chan struct{}
 	stopPodStatusChan chan struct{}
@@ -53,7 +54,7 @@ type BackupManager struct {
 	cleanupFrequency  time.Duration
 }
 
-func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognito CognitoService, token, sourceDir string) (*BackupManager, error) {
+func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognito CognitoService, rabbit *RabbitMQManager, token, sourceDir string) (*BackupManager, error) {
 	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
 	cleanupFrequency := os.Getenv("CLEANUP_FREQUENCY_MIN")
 	var backupFrequencyDuration, cleanupFrequencyDuration time.Duration
@@ -95,6 +96,7 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognit
 		cognito:           cognito,
 		token:             token,
 		sourceDir:         sourceDir,
+		rabbitMQManager:   rabbit,
 		stopChan:          make(chan struct{}),
 		stopPodStatusChan: make(chan struct{}),
 		lastBackupTime:    time.Time{},
@@ -367,13 +369,6 @@ func (bm *BackupManager) Start() {
 			case <-ticker.C:
 				ready := CheckContainerStatus(bm.kubeClient)
 				if ready {
-					rabbit, err := MakeRabbitMQManager()
-					if err != nil {
-						log.Errorf("failed to make rabbitmq manager to send container ready status: %v", err)
-						close(bm.stopPodStatusChan)
-						return
-					}
-
 					content, err := os.ReadFile(serverLogsPath)
 					if err != nil {
 						log.Errorf("failed to read server logs: %v", err)
@@ -383,7 +378,7 @@ func (bm *BackupManager) Start() {
 					log.Infof("container ready with join code: %s", code)
 
 					// Notifies the frontend about the join code
-					err = rabbit.PublishMessage(&Message{
+					err = bm.rabbitMQManager.PublishMessage(&Message{
 						Type:      "JoinCode",
 						Body:      fmt.Sprintf(`{"joinCode": "%s", "containerName": "valheim-%s", "containerType": "server", "operation": ""}`, code, bm.TenantDiscordId),
 						DiscordId: bm.TenantDiscordId,
@@ -394,7 +389,7 @@ func (bm *BackupManager) Start() {
 					}
 
 					// Notifies the frontend that it can move the server status to ready
-					err = rabbit.PublishMessage(&Message{
+					err = bm.rabbitMQManager.PublishMessage(&Message{
 						Type:      "ContainerReady",
 						Body:      fmt.Sprintf(`{"containerName": "valheim-%s", "containerType": "server", "operation": ""}`, bm.TenantDiscordId),
 						DiscordId: bm.TenantDiscordId,
@@ -405,7 +400,6 @@ func (bm *BackupManager) Start() {
 					}
 
 					log.Infof("sent rabbitmq messages")
-					defer rabbit.Channel.Close()
 					close(bm.stopPodStatusChan)
 				}
 			}
