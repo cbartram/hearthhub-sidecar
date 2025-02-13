@@ -10,6 +10,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 const (
 	backupPrefix            = "valheim-backups-auto"
 	gracefulShutdownTimeout = 1 * time.Minute
+	serverLogsPath          = "/valheim/BepInEx/config/server-logs.txt"
 )
 
 type BackupFile struct {
@@ -372,6 +374,22 @@ func (bm *BackupManager) Start() {
 						return
 					}
 
+					content, err := os.ReadFile(serverLogsPath)
+					if err != nil {
+						log.Errorf("failed to read server logs: %v", err)
+					}
+					code := parseJoinCode(string(content))
+
+					log.Infof("container ready with join code: %s", code)
+
+					// Notifies the frontend about the join code
+					err = rabbit.PublishMessage(&Message{
+						Type:      "JoinCode",
+						Body:      fmt.Sprintf(`{"joinCode": "%s", "containerName": "valheim-%s", "containerType": "server", "operation": ""}`, code, bm.TenantDiscordId),
+						DiscordId: bm.TenantDiscordId,
+					})
+
+					// Notifies the frontend that it can move the server status to ready
 					err = rabbit.PublishMessage(&Message{
 						Type:      "ContainerReady",
 						Body:      fmt.Sprintf(`{"containerName": "valheim-%s", "containerType": "server", "operation": ""}`, bm.TenantDiscordId),
@@ -382,12 +400,26 @@ func (bm *BackupManager) Start() {
 						log.Errorf("failed to publish pod container status ready message: %v", err)
 					}
 
+					rabbit.Channel.Close()
 					close(bm.stopPodStatusChan)
 					return
 				}
 			}
 		}
 	}()
+}
+
+func parseJoinCode(input string) string {
+	pattern := `join code (\d+)`
+	re := regexp.MustCompile(pattern)
+	match := re.FindStringSubmatch(input)
+
+	if len(match) > 1 {
+		// Return the captured group (the numbers after "join code")
+		return strings.TrimSpace(match[1])
+	}
+
+	return "not-found"
 }
 
 // GracefulShutdown Performs a final backup before the container stops.

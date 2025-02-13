@@ -44,8 +44,6 @@ func (rm *RabbitMQManager) PublishMessage(message *Message) error {
 		return err
 	}
 
-	defer rm.Channel.Close()
-
 	return rm.Channel.Publish(
 		"valheim-server-status", // exchange
 		message.DiscordId,       // routing key

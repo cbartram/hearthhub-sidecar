@@ -130,13 +130,6 @@ func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Client
 		return
 	}
 
-	watcher, err := cmd.MakeFileWatcher()
-	if err != nil {
-		log.Errorf("failed to make watcher: %v", err)
-		return
-	}
-
-	watcher.Start("/valheim/BepInEx/config/server-logs.txt", backupManager.TenantDiscordId)
 	collector.StartCollection()
 	backupManager.Start()
 
