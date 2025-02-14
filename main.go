@@ -64,6 +64,8 @@ func main() {
 		return
 	}
 
+	defer rabbit.Channel.Close()
+
 	var mode, messageType, token string
 	flag.StringVar(&mode, "mode", "", "Sidecar Mode: backup or publish")
 	flag.StringVar(&token, "token", "", "Tenant refresh token")
@@ -81,6 +83,7 @@ func main() {
 		StartBackups(clientset, metricsClient, rabbit, token)
 	}
 
+	log.Infof("closing rabbitmq channel")
 }
 
 // Publish Runs the aqmp publish protocol to send a message about the valheim server to the queue.
