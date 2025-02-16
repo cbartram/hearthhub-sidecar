@@ -295,6 +295,19 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		log.Infof("backups: %d do not exceed configured max backups: %d", len(pairs), maxBackupsInt)
 	}
 
+	// Need to get access token not refresh token so AuthUser call is necessary
+	// and don't want an error authenticating the user stopping us from purging the backup files so
+	// continue with the purge even if user is nil
+	user, err := bm.cognito.AuthUser(ctx, &bm.token, &bm.TenantDiscordId)
+	if err != nil {
+		log.Errorf("failed to auth user: %v", err)
+	}
+
+	err = bm.cognito.MergeDeletedFilesBatch(ctx, user, filesToDelete)
+	if err != nil {
+		log.Errorf("failed to remove backup files from cognito attributes: %v", err)
+	}
+
 	// Delete the oldest n files
 	for _, file := range filesToDelete {
 		deleteInput := &s3.DeleteObjectInput{
