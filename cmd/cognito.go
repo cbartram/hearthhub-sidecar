@@ -111,7 +111,7 @@ func (c *CognitoServiceImpl) genericBackupUpdate(ctx context.Context, user *Cogn
 		}
 	}
 
-	log.Infof("files before: %v", installedFiles)
+	log.Infof("num files before: %d", len(installedFiles))
 
 	// for each .db file, insert or update the user's installed_backups attribute with
 	// a true value for the file since it was found on the pvc. "fileNames" is the list of backup files directly from the
@@ -132,7 +132,7 @@ func (c *CognitoServiceImpl) genericBackupUpdate(ctx context.Context, user *Cogn
 		Value: aws.String(string(mergedBytes)),
 	}
 
-	log.Infof("merged files after: %v", installedFiles)
+	log.Infof("num files after: %d", len(installedFiles))
 	err = c.UpdateUserAttributes(ctx, &user.Credentials.AccessToken, []types.AttributeType{attr})
 	if err != nil {
 		log.Errorf("failed to update user attributes: %v", err)

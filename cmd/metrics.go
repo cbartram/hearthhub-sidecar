@@ -50,7 +50,7 @@ func MakeMetricsCollector(kubeClient kubernetes.Interface, metricsClient *metric
 		tenantDiscordId:     discordId,
 		metricsClient:       *metricsClient,
 		wg:                  sync.WaitGroup{},
-		collectionFrequency: time.Second * 5,
+		collectionFrequency: time.Second * 10,
 	}, nil
 }
 

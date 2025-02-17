@@ -22,6 +22,7 @@ const (
 	backupPrefix            = "valheim-backups-auto"
 	gracefulShutdownTimeout = 1 * time.Minute
 	serverLogsPath          = "/valheim/BepInEx/config/server-logs.txt"
+	backupsPathPVC          = "/root/.config/unity3d/IronGate/Valheim/worlds_local/"
 )
 
 type BackupFile struct {
@@ -107,7 +108,9 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognit
 	}, nil
 }
 
-// BackupWorldSaves Persists located *.fwl and *.db files to S3 periodically.
+// BackupWorldSaves Persists located *.fwl and *.db files to S3 periodically. This will back up
+// all worlds in the pvc not just the worlds for the running server. The cleanup process is responsible
+// for ensuring backups get purged from disk and S3.
 func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 	files, err := FindWorldFiles(bm.sourceDir)
 	if err != nil {
@@ -225,7 +228,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 
 		// Skip if not a backup file
 		if !strings.Contains(filename, "_backup_auto-") || !strings.Contains(filename, worldName) {
-			log.Infof("skipping (either not backup or not matching world as running server): %s", filename)
+			log.Infof("skipping file (not backup or does not match world: %s, file: %s", worldName, filename)
 			continue
 		}
 
@@ -265,6 +268,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 	}
 
 	var pairs []BackupPair
+
 	// Find orphaned .fwl files (no matching .db)
 	for timestamp, fwl := range fwlMap {
 		db, exists := dbMap[timestamp]
@@ -287,7 +291,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 	if len(pairs) > maxBackupsInt {
 		pairsToDelete := pairs[:len(pairs)-maxBackupsInt]
 		for _, pair := range pairsToDelete {
-			log.Infof("scheduling .db/.fwl pair: %s for deletion", pair.FWL.BaseName)
+			log.Infof("scheduling .db/.fwl pair: %s for deletion", pair.DB.Key)
 			filesToDelete = append(filesToDelete, pair.FWL.Key)
 			filesToDelete = append(filesToDelete, pair.DB.Key)
 		}
@@ -319,7 +323,12 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		if err != nil {
 			return errors.New(fmt.Sprintf("failed to delete object %s: %v", file, err))
 		}
-		log.Infof("deleted: %s", file)
+
+		// Also make sure to delete this file from the pvc or it will just get re-uploaded to s3
+		localFile := fmt.Sprintf("%s/%s", backupsPathPVC, filepath.Base(file))
+		os.Remove(localFile)
+
+		log.Infof("deleted s3 file: %s and local file: %s", file, localFile)
 	}
 	return nil
 }
@@ -372,7 +381,7 @@ func (bm *BackupManager) Start() {
 	go func() {
 		defer bm.wg.Done()
 
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 
 		for {
