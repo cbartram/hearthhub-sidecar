@@ -136,6 +136,13 @@ func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Client
 		return
 	}
 
+	logCollector, err := cmd.MakeLogsCollector(rabbit, backupManager.TenantDiscordId)
+	if err != nil {
+		log.Errorf("failed to make log collector: %v", err)
+		return
+	}
+
+	logCollector.StartCollection()
 	collector.StartCollection()
 	backupManager.Start()
 

@@ -193,18 +193,3 @@ func (m *MetricsCollector) getCurrentPodMetrics(ctx context.Context) (*PodMetric
 
 	return result, nil
 }
-
-// formatMetrics returns a human-readable string of the metrics
-func formatMetrics(m *PodMetrics) string {
-	return fmt.Sprintf(
-		"CPU: %.1f%% (%dm/%dm limit, %dm request) Memory: %.1f%% (%dMi/%dMi limit, %dMi request)",
-		m.CPU.UsagePercent,
-		m.CPU.CurrentMillis,
-		m.CPU.LimitMillis,
-		m.CPU.RequestMillis,
-		m.Memory.UsagePercent,
-		m.Memory.CurrentBytes/(1024*1024),
-		m.Memory.LimitBytes/(1024*1024),
-		m.Memory.RequestBytes/(1024*1024),
-	)
-}
