@@ -20,8 +20,7 @@ type CognitoService interface {
 	GetUserAttributes(ctx context.Context, accessToken *string) ([]types.AttributeType, error)
 	AuthUser(ctx context.Context, refreshToken, discordId *string) (*CognitoUser, error)
 	UpdateUserAttributes(ctx context.Context, accessToken *string, attributes []types.AttributeType) error
-	MergeInstalledFilesBatch(ctx context.Context, user *CognitoUser, fileNames []string) error
-	MergeDeletedFilesBatch(ctx context.Context, user *CognitoUser, fileNames []string) error
+	UpdateInstalledFiles(ctx context.Context, user *CognitoUser, newFiles map[string]bool) error
 }
 
 type CognitoServiceImpl struct {
@@ -80,48 +79,8 @@ func MakeCognitoSecretHash(userId, clientId, clientSecret string) string {
 	return base64.StdEncoding.EncodeToString(digest)
 }
 
-func (c *CognitoServiceImpl) MergeDeletedFilesBatch(ctx context.Context, user *CognitoUser, fileNames []string) error {
-	return c.genericBackupUpdate(ctx, user, fileNames, func(fileName string, installedFiles map[string]bool) map[string]bool {
-		_, exists := installedFiles[fileName]
-		if exists {
-			log.Infof("removing file: %s", fileName)
-			delete(installedFiles, fileName)
-		}
-		return installedFiles
-	})
-}
-
-func (c *CognitoServiceImpl) genericBackupUpdate(ctx context.Context, user *CognitoUser, fileNames []string, operationFunc func(fileName string, installedFiles map[string]bool) map[string]bool) error {
-	installedFiles := make(map[string]bool)
-	attributes, err := c.GetUserAttributes(ctx, &user.Credentials.AccessToken)
-	if err != nil {
-		log.Errorf("failed to get user attributes: %v", err)
-		return err
-	}
-
-	for _, attribute := range attributes {
-		if *attribute.Name == "custom:installed_backups" {
-			// Deserialize the json string value of the attribute into a struct
-			err := json.Unmarshal([]byte(*attribute.Value), &installedFiles)
-			if err != nil {
-				log.Errorf("failed to unmarshal installed mods: %v", err)
-				return err
-			}
-			break
-		}
-	}
-
-	log.Infof("num files before: %d", len(installedFiles))
-
-	// for each .db file, insert or update the user's installed_backups attribute with
-	// a true value for the file since it was found on the pvc. "fileNames" is the list of backup files directly from the
-	// pvc.
-	for _, fileName := range fileNames {
-		installedFiles = operationFunc(fileName, installedFiles)
-	}
-
-	// Serialize the installed mods to json
-	mergedBytes, err := json.Marshal(installedFiles)
+func (c *CognitoServiceImpl) UpdateInstalledFiles(ctx context.Context, user *CognitoUser, newFiles map[string]bool) error {
+	mergedBytes, err := json.Marshal(newFiles)
 	if err != nil {
 		log.Errorf("failed to marshal installed files: %v", err)
 		return err
@@ -132,7 +91,6 @@ func (c *CognitoServiceImpl) genericBackupUpdate(ctx context.Context, user *Cogn
 		Value: aws.String(string(mergedBytes)),
 	}
 
-	log.Infof("num files after: %d", len(installedFiles))
 	err = c.UpdateUserAttributes(ctx, &user.Credentials.AccessToken, []types.AttributeType{attr})
 	if err != nil {
 		log.Errorf("failed to update user attributes: %v", err)
@@ -140,16 +98,6 @@ func (c *CognitoServiceImpl) genericBackupUpdate(ctx context.Context, user *Cogn
 	}
 
 	return nil
-}
-
-// MergeInstalledFilesBatch Updates a users attribute called: custom:installed_files by merging the existing
-// state with any new backup files that were just installed on the PVC.
-func (c *CognitoServiceImpl) MergeInstalledFilesBatch(ctx context.Context, user *CognitoUser, fileNames []string) error {
-	return c.genericBackupUpdate(ctx, user, fileNames, func(fileName string, installedFiles map[string]bool) map[string]bool {
-		log.Infof("merging file: %s", fileName)
-		installedFiles[fileName] = true
-		return installedFiles
-	})
 }
 
 func (c *CognitoServiceImpl) GetUserAttributes(ctx context.Context, accessToken *string) ([]types.AttributeType, error) {

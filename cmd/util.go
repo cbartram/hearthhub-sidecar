@@ -8,6 +8,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -109,4 +110,17 @@ func FindWorldFiles(dir string) ([]string, error) {
 
 	log.Infof("found: %v world files", len(worldFiles))
 	return worldFiles, nil
+}
+
+func parseJoinCode(input string) string {
+	pattern := `join code (\d+)`
+	re := regexp.MustCompile(pattern)
+	match := re.FindStringSubmatch(input)
+
+	if len(match) > 1 {
+		// Return the captured group (the numbers after "join code")
+		return strings.TrimSpace(match[1])
+	}
+
+	return "not-found"
 }

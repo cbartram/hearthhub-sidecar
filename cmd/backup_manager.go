@@ -10,7 +10,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,7 +21,6 @@ const (
 	backupPrefix            = "valheim-backups-auto"
 	gracefulShutdownTimeout = 1 * time.Minute
 	serverLogsPath          = "/valheim/BepInEx/config/server-logs.txt"
-	backupsPathPVC          = "/root/.config/unity3d/IronGate/Valheim/worlds_local/"
 )
 
 type BackupFile struct {
@@ -57,23 +55,10 @@ type BackupManager struct {
 
 func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognito CognitoService, rabbit *RabbitMQManager, token, sourceDir string) (*BackupManager, error) {
 	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
-	cleanupFrequency := os.Getenv("CLEANUP_FREQUENCY_MIN")
 	var backupFrequencyDuration, cleanupFrequencyDuration time.Duration
 
 	if backupFrequency == "" {
 		backupFrequencyDuration = 10 * time.Minute
-	}
-
-	if cleanupFrequency == "" {
-		cleanupFrequencyDuration = 1 * time.Hour
-	}
-
-	cleanupFreqInt, err := strconv.Atoi(cleanupFrequency)
-	if err != nil {
-		log.Errorf("unable to parse CLEANUP_FREQUENCY_MIN: %v defaulting to 60 minutes", err)
-		cleanupFrequencyDuration = 1 * time.Hour
-	} else {
-		cleanupFrequencyDuration = time.Duration(cleanupFreqInt) * time.Minute
 	}
 
 	backupFreqInt, err := strconv.Atoi(backupFrequency)
@@ -153,15 +138,21 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 	// Finally update cognito with the fact that the user now has n files backed up from their pvc. i.e. the files
 	// are already installed on the pvc
 	log.Infof("merging: %d synced s3 backup files with cognito user attributes", len(dbFiles))
-	err = bm.cognito.MergeInstalledFilesBatch(ctx, user, dbFiles)
+	installedFiles := make(map[string]bool)
+	for _, f := range dbFiles {
+		installedFiles[f] = true
+	}
+
+	err = bm.cognito.UpdateInstalledFiles(ctx, user, installedFiles)
 	if err != nil {
-		log.Errorf("failed to merge installed files: %v", err)
+		log.Errorf("failed to update cognito with installed files (backup): %v", err)
 	}
 
 	return nil
 }
 
-// PerformPeriodicBackup Performs the backup of S3 files
+// PerformPeriodicBackup Performs the backup of S3 files and subsequently cleans up any old
+// backups from both s3 and the pvc
 func (bm *BackupManager) PerformPeriodicBackup() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -170,21 +161,12 @@ func (bm *BackupManager) PerformPeriodicBackup() {
 	bm.lastBackupTime = time.Now()
 	bm.lastBackupMu.Unlock()
 
+	log.Infof("performing periodic s3 BACKUP at: %s", time.Now().Format(time.RFC3339))
 	if err := bm.BackupWorldSaves(ctx); err != nil {
 		log.Errorf("periodic backup failed: %v", err)
 	}
-}
 
-// PerformPeriodicCleanup Performs a periodic cleanup of the automated backups in S3 by remove all but the
-// last n backups for a given world.
-func (bm *BackupManager) PerformPeriodicCleanup() {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
-	bm.lastCleanupMu.Lock()
-	bm.lastCleanupTime = time.Now()
-	bm.lastCleanupMu.Unlock()
-
+	log.Infof("performing periodic s3 CLEANUP at: %s", time.Now().Format(time.RFC3339))
 	if err := bm.Cleanup(ctx); err != nil {
 		log.Errorf("periodic cleanup failed: %v", err)
 	}
@@ -218,8 +200,8 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		return err
 	}
 
-	fwlMap := make(map[string]BackupFile) // map[timestamp]BackupFile
-	dbMap := make(map[string]BackupFile)  // map[timestamp]BackupFile
+	fwlMap := make(map[string]BackupFile)
+	dbMap := make(map[string]BackupFile)
 	filesToDelete := make([]string, 0)
 
 	// First pass: categorize all files
@@ -299,19 +281,6 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		log.Infof("backups: %d do not exceed configured max backups: %d", len(pairs), maxBackupsInt)
 	}
 
-	// Need to get access token not refresh token so AuthUser call is necessary
-	// and don't want an error authenticating the user stopping us from purging the backup files so
-	// continue with the purge even if user is nil
-	user, err := bm.cognito.AuthUser(ctx, &bm.token, &bm.TenantDiscordId)
-	if err != nil {
-		log.Errorf("failed to auth user: %v", err)
-	}
-
-	err = bm.cognito.MergeDeletedFilesBatch(ctx, user, filesToDelete)
-	if err != nil {
-		log.Errorf("failed to remove backup files from cognito attributes: %v", err)
-	}
-
 	// Delete the oldest n files
 	for _, file := range filesToDelete {
 		deleteInput := &s3.DeleteObjectInput{
@@ -325,11 +294,41 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		}
 
 		// Also make sure to delete this file from the pvc or it will just get re-uploaded to s3
-		localFile := fmt.Sprintf("%s/%s", backupsPathPVC, filepath.Base(file))
+		localFile := fmt.Sprintf("%s/%s", bm.sourceDir, filepath.Base(file))
 		os.Remove(localFile)
 
 		log.Infof("deleted s3 file: %s and local file: %s", file, localFile)
 	}
+
+	// Need to get access token not refresh token so AuthUser call is necessary
+	// and don't want an error authenticating the user stopping us from purging the backup files so
+	// continue with the purge even if user is nil
+	user, err := bm.cognito.AuthUser(ctx, &bm.token, &bm.TenantDiscordId)
+	if err != nil {
+		log.Errorf("failed to auth user: %v", err)
+	}
+
+	newInstalledFiles := make(map[string]bool)
+	files, err := FindWorldFiles(bm.sourceDir)
+	for _, file := range files {
+		filename := filepath.Base(file)
+
+		if !strings.Contains(filename, "_backup_auto-") || !strings.Contains(filename, worldName) || !strings.HasSuffix(filename, ".fwl") {
+			continue
+		}
+
+		log.Infof("adding: %s to cognito installed files", filename)
+		newInstalledFiles[filename] = true
+	}
+
+	// Finally add the actual world file which is installed since it is running
+	newInstalledFiles[worldName+".db"] = true
+
+	err = bm.cognito.UpdateInstalledFiles(ctx, user, newInstalledFiles)
+	if err != nil {
+		log.Errorf("failed to update cognito with installed files (cleanup): %v", err)
+	}
+
 	return nil
 }
 
@@ -352,26 +351,7 @@ func (bm *BackupManager) Start() {
 			case <-bm.stopChan:
 				return
 			case <-ticker.C:
-				log.Infof("performing periodic s3 backup")
 				bm.PerformPeriodicBackup()
-			}
-		}
-	}()
-
-	// Cleanup goroutine
-	go func() {
-		defer bm.wg.Done()
-
-		cleanupTicker := time.NewTicker(bm.cleanupFrequency)
-		defer cleanupTicker.Stop()
-
-		for {
-			select {
-			case <-bm.stopChan:
-				return
-			case <-cleanupTicker.C:
-				log.Infof("performing periodic s3 cleanup")
-				bm.PerformPeriodicCleanup()
 			}
 		}
 	}()
@@ -429,19 +409,6 @@ func (bm *BackupManager) Start() {
 	}()
 }
 
-func parseJoinCode(input string) string {
-	pattern := `join code (\d+)`
-	re := regexp.MustCompile(pattern)
-	match := re.FindStringSubmatch(input)
-
-	if len(match) > 1 {
-		// Return the captured group (the numbers after "join code")
-		return strings.TrimSpace(match[1])
-	}
-
-	return "not-found"
-}
-
 // GracefulShutdown Performs a final backup before the container stops.
 func (bm *BackupManager) GracefulShutdown() {
 	close(bm.stopChan)
@@ -452,6 +419,10 @@ func (bm *BackupManager) GracefulShutdown() {
 
 	log.Println("Performing final backup before shutdown")
 	if err := bm.BackupWorldSaves(ctx); err != nil {
-		log.Printf("Final backup failed: %v", err)
+		log.Errorf("final backup failed: %v", err)
+	}
+
+	if err := bm.Cleanup(ctx); err != nil {
+		log.Errorf("final cleanup failed: %v", err)
 	}
 }
