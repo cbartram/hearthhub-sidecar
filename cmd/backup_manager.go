@@ -48,12 +48,13 @@ type BackupManager struct {
 	lastBackupTime    time.Time
 	backupFrequency   time.Duration
 	TenantDiscordId   string
+	maxBackups        int
 	lastCleanupMu     sync.Mutex
 	lastCleanupTime   time.Time
 	cleanupFrequency  time.Duration
 }
 
-func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognito CognitoService, rabbit *RabbitMQManager, token, sourceDir string) (*BackupManager, error) {
+func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognito CognitoService, rabbit *RabbitMQManager, token, sourceDir string, maxBackups int) (*BackupManager, error) {
 	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
 	var backupFrequencyDuration, cleanupFrequencyDuration time.Duration
 
@@ -90,6 +91,7 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognit
 		TenantDiscordId:   discordID,
 		lastCleanupTime:   time.Time{},
 		cleanupFrequency:  backupFrequencyDuration,
+		maxBackups:        maxBackups,
 	}, nil
 }
 
@@ -175,20 +177,13 @@ func (bm *BackupManager) PerformPeriodicBackup() {
 // Cleanup Cleans the automatically generated backups by finding all world files for a players server in S3,
 // sorting by the timestamps of the backups, and deleting all but the most recent n backups
 func (bm *BackupManager) Cleanup(ctx context.Context) error {
-	maxBackups := os.Getenv("MAX_BACKUPS")
-	maxBackupsInt, err := strconv.Atoi(maxBackups)
-	if err != nil {
-		log.Errorf("unable to parse MAX_BACKUPS: %v defaulting to 3", err)
-		maxBackupsInt = 3
-	}
-
 	worldName, err := GetWorldName(bm.kubeClient, bm.TenantDiscordId)
 	if err != nil {
 		log.Errorf("failed to get world name, skipping delete: %v", err)
 		return err
 	}
 
-	log.Infof("running cleanup process for the last: %d backups for world: %s", maxBackupsInt, worldName)
+	log.Infof("running cleanup process for the last: %d backups for world: %s", bm.maxBackups, worldName)
 
 	result, err := bm.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: aws.String(os.Getenv("BUCKET_NAME")),
@@ -270,15 +265,15 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 	})
 
 	// Mark older pairs for deletion, keeping only the newest pairs
-	if len(pairs) > maxBackupsInt {
-		pairsToDelete := pairs[:len(pairs)-maxBackupsInt]
+	if len(pairs) > bm.maxBackups {
+		pairsToDelete := pairs[:len(pairs)-bm.maxBackups]
 		for _, pair := range pairsToDelete {
 			log.Infof("scheduling .db/.fwl pair: %s for deletion", pair.DB.Key)
 			filesToDelete = append(filesToDelete, pair.FWL.Key)
 			filesToDelete = append(filesToDelete, pair.DB.Key)
 		}
 	} else {
-		log.Infof("backups: %d do not exceed configured max backups: %d", len(pairs), maxBackupsInt)
+		log.Infof("backups: %d do not exceed configured max backups: %d", len(pairs), bm.maxBackups)
 	}
 
 	// Delete the oldest n files

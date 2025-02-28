@@ -67,20 +67,22 @@ func main() {
 	defer rabbit.Channel.Close()
 
 	var mode, messageType, token string
+	var maxBackups int
 	flag.StringVar(&mode, "mode", "", "Sidecar Mode: backup or publish")
 	flag.StringVar(&token, "token", "", "Tenant refresh token")
+	flag.IntVar(&maxBackups, "max-backups", 3, "Maximum number of backups to keep in s3")
 	flag.StringVar(&messageType, "type", "", "Message type: PostStart, PreStop, or Health")
 	flag.Parse()
 
 	if mode == "backup" {
 		log.Infof("backup mode specified")
-		StartBackups(clientset, metricsClient, rabbit, token)
+		StartBackups(clientset, metricsClient, rabbit, token, maxBackups)
 	} else if mode == "publish" {
 		log.Infof("publish mode specified")
 		Publish(clientset, rabbit, messageType)
 	} else {
 		log.Infof("no -mode specified defaulting to: backup")
-		StartBackups(clientset, metricsClient, rabbit, token)
+		StartBackups(clientset, metricsClient, rabbit, token, maxBackups)
 	}
 
 	log.Infof("closing rabbitmq channel")
@@ -114,7 +116,7 @@ func Publish(clientset *kubernetes.Clientset, rabbit *cmd.RabbitMQManager, messa
 }
 
 // StartBackups Starts the backup process to S3.
-func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Clientset, rabbit *cmd.RabbitMQManager, token string) {
+func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Clientset, rabbit *cmd.RabbitMQManager, token string, maxBackups int) {
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		log.Fatalf("unable to load AWS SDK config: %v", err)
@@ -125,7 +127,7 @@ func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Client
 	s3Client := cmd.MakeS3Client(cfg)
 	cognito := cmd.MakeCognitoService(cfg)
 
-	backupManager, err := cmd.NewBackupManager(s3Client, clientset, cognito, rabbit, token, "/root/.config/unity3d/IronGate/Valheim/worlds_local")
+	backupManager, err := cmd.NewBackupManager(s3Client, clientset, cognito, rabbit, token, "/root/.config/unity3d/IronGate/Valheim/worlds_local", maxBackups)
 	if err != nil {
 		log.Fatalf("Failed to create backup manager: %v", err)
 	}
