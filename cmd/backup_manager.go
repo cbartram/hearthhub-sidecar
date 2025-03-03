@@ -101,7 +101,8 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		log.Errorf("failed to fetch user from db: %v", tx.Error)
 		return err
 	}
-
+	// TODO Handle multiple servers here
+	serverId := user.Servers[0].ID
 	user.BackupFiles = []model.BackupFile{}
 	user.WorldFiles = []model.WorldFile{}
 
@@ -131,6 +132,7 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 						Installed: true,
 						S3Key:     s3Key,
 					},
+					ServerID: serverId,
 				})
 			}
 		}
@@ -303,6 +305,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		return err
 	}
 
+	serverId := user.Servers[0].ID
 	user.BackupFiles = []model.BackupFile{}
 	user.WorldFiles = []model.WorldFile{}
 
@@ -330,6 +333,7 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 					Installed: true,
 					S3Key:     s3Key,
 				},
+				ServerID: serverId,
 			})
 		}
 	}
