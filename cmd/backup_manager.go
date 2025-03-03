@@ -7,7 +7,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/cbartram/hearthhub-common/model"
-	"github.com/cbartram/hearthhub-common/service"
 	log "github.com/sirupsen/logrus"
 	"os"
 	"path/filepath"
@@ -38,7 +37,6 @@ type BackupPair struct {
 type BackupManager struct {
 	s3Client          ObjectStore
 	wrapper           *ServiceWrapper
-	cognito           service.CognitoService
 	token             string
 	stopChan          chan struct{}
 	stopPodStatusChan chan struct{}
@@ -54,7 +52,7 @@ type BackupManager struct {
 	cleanupFrequency  time.Duration
 }
 
-func NewBackupManager(w *ServiceWrapper, s3Client *S3Client, cognito CognitoService, token, sourceDir string, maxBackups int) (*BackupManager, error) {
+func NewBackupManager(w *ServiceWrapper, s3Client *S3Client, token, discordId, sourceDir string, maxBackups int) (*BackupManager, error) {
 	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
 	var backupFrequencyDuration, cleanupFrequencyDuration time.Duration
 
@@ -70,24 +68,18 @@ func NewBackupManager(w *ServiceWrapper, s3Client *S3Client, cognito CognitoServ
 		backupFrequencyDuration = time.Duration(backupFreqInt) * time.Minute
 	}
 
-	discordID, err := GetPodLabel(w.KubeClient, "tenant-discord-id")
-	if err != nil {
-		log.Fatalf("Failed to get Discord ID: %v", err)
-	}
-
-	log.Infof("tenant id: %s, backups occur every: %v, cleanups occur every: %v", discordID, backupFrequencyDuration, cleanupFrequencyDuration)
+	log.Infof("tenant id: %s, backups occur every: %v, cleanups occur every: %v", discordId, backupFrequencyDuration, cleanupFrequencyDuration)
 
 	return &BackupManager{
 		s3Client:          s3Client,
 		wrapper:           w,
-		cognito:           cognito,
 		token:             token,
 		sourceDir:         sourceDir,
 		stopChan:          make(chan struct{}),
 		stopPodStatusChan: make(chan struct{}),
 		lastBackupTime:    time.Time{},
 		backupFrequency:   backupFrequencyDuration,
-		TenantDiscordId:   discordID,
+		TenantDiscordId:   discordId,
 		lastCleanupTime:   time.Time{},
 		cleanupFrequency:  backupFrequencyDuration,
 		maxBackups:        maxBackups,
@@ -103,20 +95,15 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		return fmt.Errorf("error finding world files: %v", err)
 	}
 
-	_, err = bm.cognito.AuthUser(ctx, &bm.token, &bm.TenantDiscordId)
-	if err != nil {
-		return fmt.Errorf("error authenticating user: %v", err)
-	}
-
-	var dbUser model.User
-	tx := bm.wrapper.DB.Where("discord_id = ?", bm.TenantDiscordId).First(&dbUser)
+	var user model.User
+	tx := bm.wrapper.DB.Where("discord_id = ?", bm.TenantDiscordId).First(&user)
 	if tx.Error != nil {
 		log.Errorf("failed to fetch user from db: %v", tx.Error)
 		return err
 	}
 
-	dbUser.BackupFiles = []model.BackupFile{}
-	dbUser.WorldFiles = []model.WorldFile{}
+	user.BackupFiles = []model.BackupFile{}
+	user.WorldFiles = []model.WorldFile{}
 
 	for _, file := range files {
 		fileName := filepath.Base(file)
@@ -130,7 +117,7 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 
 		if strings.HasSuffix(fileName, ".db") {
 			if strings.Contains(fileName, "_backup_auto-") {
-				dbUser.BackupFiles = append(dbUser.BackupFiles, model.BackupFile{
+				user.BackupFiles = append(user.BackupFiles, model.BackupFile{
 					BaseFile: model.BaseFile{
 						FileName:  fileName,
 						Installed: true,
@@ -138,7 +125,7 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 					},
 				})
 			} else {
-				dbUser.WorldFiles = append(dbUser.WorldFiles, model.WorldFile{
+				user.WorldFiles = append(user.WorldFiles, model.WorldFile{
 					BaseFile: model.BaseFile{
 						FileName:  fileName,
 						Installed: true,
@@ -163,7 +150,7 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		log.Infof("successfully backed up %s to s3://%s/%s", file, os.Getenv("BUCKET_NAME"), s3Key)
 	}
 
-	bm.wrapper.DB.Save(&dbUser)
+	bm.wrapper.DB.Save(&user)
 	return nil
 }
 
@@ -191,7 +178,7 @@ func (bm *BackupManager) PerformPeriodicBackup() {
 // Cleanup Cleans the automatically generated backups by finding all world files for a players server in S3,
 // sorting by the timestamps of the backups, and deleting all but the most recent n backups
 func (bm *BackupManager) Cleanup(ctx context.Context) error {
-	worldName, err := GetWorldName(bm.kubeClient, bm.TenantDiscordId)
+	worldName, err := GetWorldName(bm.wrapper.KubeClient, bm.TenantDiscordId)
 	if err != nil {
 		log.Errorf("failed to get world name, skipping delete: %v", err)
 		return err
@@ -309,35 +296,45 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		log.Infof("deleted s3 file: %s and local file: %s", file, localFile)
 	}
 
-	// Need to get access token not refresh token so AuthUser call is necessary
-	// and don't want an error authenticating the user stopping us from purging the backup files so
-	// continue with the purge even if user is nil
-	user, err := bm.cognito.AuthUser(ctx, &bm.token, &bm.TenantDiscordId)
-	if err != nil {
-		log.Errorf("failed to auth user: %v", err)
+	var user model.User
+	tx := bm.wrapper.DB.Where("discord_id = ?", bm.TenantDiscordId).First(&user)
+	if tx.Error != nil {
+		log.Errorf("failed to get user: %v", tx.Error)
+		return err
 	}
 
-	newInstalledFiles := make(map[string]bool)
-	files, err := FindWorldFiles(bm.sourceDir)
+	user.BackupFiles = []model.BackupFile{}
+	user.WorldFiles = []model.WorldFile{}
+
+	files, _ := FindFiles(bm.sourceDir)
 	for _, file := range files {
 		filename := filepath.Base(file)
 
-		if !strings.Contains(filename, "_backup_auto-") || !strings.Contains(filename, worldName) || !strings.HasSuffix(filename, ".fwl") {
+		if !strings.Contains(filename, worldName) || !strings.HasSuffix(filename, ".db") {
 			continue
 		}
 
-		log.Infof("adding: %s to cognito installed files", filename)
-		newInstalledFiles[filename] = true
+		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, filename)
+		if strings.Contains(filename, "_backup_auto-") {
+			user.BackupFiles = append(user.BackupFiles, model.BackupFile{
+				BaseFile: model.BaseFile{
+					FileName:  filename,
+					Installed: true,
+					S3Key:     s3Key,
+				},
+			})
+		} else if filename == (worldName + ".db") {
+			user.WorldFiles = append(user.WorldFiles, model.WorldFile{
+				BaseFile: model.BaseFile{
+					FileName:  filename,
+					Installed: true,
+					S3Key:     s3Key,
+				},
+			})
+		}
 	}
 
-	// Finally add the actual world file which is installed since it is running
-	newInstalledFiles[worldName+".db"] = true
-
-	err = bm.cognito.UpdateInstalledFiles(ctx, user, newInstalledFiles)
-	if err != nil {
-		log.Errorf("failed to update cognito with installed files (cleanup): %v", err)
-	}
-
+	bm.wrapper.DB.Save(&user)
 	return nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/cbartram/hearthhub-common/model"
+	"github.com/cbartram/hearthhub-common/service"
 	"github.com/cbartram/hearthhub-sidecar/cmd"
 	log "github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
@@ -132,11 +133,20 @@ func StartBackups(w *cmd.ServiceWrapper, token string, maxBackups int) {
 		log.Fatalf("unable to load AWS SDK config: %v", err)
 	}
 
+	discordId, err := cmd.GetPodLabel(w.KubeClient, "tenant-discord-id")
+	if err != nil {
+		log.Fatalf("failed to get discord id from pod label: %v", err)
+	}
+
 	log.Info("Starting Valheim server backup sidecar")
 	s3Client := cmd.MakeS3Client(cfg)
-	cognito := cmd.MakeCognitoService(cfg)
+	cognito := service.MakeCognitoService(cfg)
+	_, err = cognito.AuthUser(context.Background(), &token, &discordId, w.DB)
+	if err != nil {
+		log.Fatalf("error authenticating user, bad token or discord id mismatch: %v", err)
+	}
 
-	backupManager, err := cmd.NewBackupManager(w, s3Client, cognito, token, "/root/.config/unity3d/IronGate/Valheim/worlds_local", maxBackups)
+	backupManager, err := cmd.NewBackupManager(w, s3Client, token, discordId, "/root/.config/unity3d/IronGate/Valheim/worlds_local", maxBackups)
 	if err != nil {
 		log.Fatalf("Failed to create backup manager: %v", err)
 	}
