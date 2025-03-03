@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/cbartram/hearthhub-common/model"
+	"github.com/cbartram/hearthhub-common/service"
 	log "github.com/sirupsen/logrus"
-	"k8s.io/client-go/kubernetes"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,9 +37,8 @@ type BackupPair struct {
 }
 type BackupManager struct {
 	s3Client          ObjectStore
-	kubeClient        kubernetes.Interface
-	cognito           CognitoService
-	rabbitMQManager   *RabbitMQManager
+	wrapper           *ServiceWrapper
+	cognito           service.CognitoService
 	token             string
 	stopChan          chan struct{}
 	stopPodStatusChan chan struct{}
@@ -54,7 +54,7 @@ type BackupManager struct {
 	cleanupFrequency  time.Duration
 }
 
-func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognito CognitoService, rabbit *RabbitMQManager, token, sourceDir string, maxBackups int) (*BackupManager, error) {
+func NewBackupManager(w *ServiceWrapper, s3Client *S3Client, cognito CognitoService, token, sourceDir string, maxBackups int) (*BackupManager, error) {
 	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
 	var backupFrequencyDuration, cleanupFrequencyDuration time.Duration
 
@@ -70,7 +70,7 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognit
 		backupFrequencyDuration = time.Duration(backupFreqInt) * time.Minute
 	}
 
-	discordID, err := GetPodLabel(clientset, "tenant-discord-id")
+	discordID, err := GetPodLabel(w.KubeClient, "tenant-discord-id")
 	if err != nil {
 		log.Fatalf("Failed to get Discord ID: %v", err)
 	}
@@ -79,11 +79,10 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognit
 
 	return &BackupManager{
 		s3Client:          s3Client,
-		kubeClient:        clientset,
+		wrapper:           w,
 		cognito:           cognito,
 		token:             token,
 		sourceDir:         sourceDir,
-		rabbitMQManager:   rabbit,
 		stopChan:          make(chan struct{}),
 		stopPodStatusChan: make(chan struct{}),
 		lastBackupTime:    time.Time{},
@@ -99,18 +98,29 @@ func NewBackupManager(s3Client *S3Client, clientset kubernetes.Interface, cognit
 // all worlds in the pvc not just the worlds for the running server. The cleanup process is responsible
 // for ensuring backups get purged from disk and S3.
 func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
-	files, err := FindWorldFiles(bm.sourceDir)
+	files, err := FindFiles(bm.sourceDir)
 	if err != nil {
 		return fmt.Errorf("error finding world files: %v", err)
 	}
 
-	user, err := bm.cognito.AuthUser(ctx, &bm.token, &bm.TenantDiscordId)
+	_, err = bm.cognito.AuthUser(ctx, &bm.token, &bm.TenantDiscordId)
 	if err != nil {
 		return fmt.Errorf("error authenticating user: %v", err)
 	}
-	var dbFiles []string
+
+	var dbUser model.User
+	tx := bm.wrapper.DB.Where("discord_id = ?", bm.TenantDiscordId).First(&dbUser)
+	if tx.Error != nil {
+		log.Errorf("failed to fetch user from db: %v", tx.Error)
+		return err
+	}
+
+	dbUser.BackupFiles = []model.BackupFile{}
+	dbUser.WorldFiles = []model.WorldFile{}
+
 	for _, file := range files {
-		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, filepath.Base(file))
+		fileName := filepath.Base(file)
+		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, fileName)
 		fileData, err := os.Open(file)
 		if err != nil {
 			log.Infof("Failed to open file %s: %v", file, err)
@@ -118,8 +128,24 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		}
 		defer fileData.Close()
 
-		if strings.HasSuffix(filepath.Base(file), ".db") {
-			dbFiles = append(dbFiles, filepath.Base(file))
+		if strings.HasSuffix(fileName, ".db") {
+			if strings.Contains(fileName, "_backup_auto-") {
+				dbUser.BackupFiles = append(dbUser.BackupFiles, model.BackupFile{
+					BaseFile: model.BaseFile{
+						FileName:  fileName,
+						Installed: true,
+						S3Key:     s3Key,
+					},
+				})
+			} else {
+				dbUser.WorldFiles = append(dbUser.WorldFiles, model.WorldFile{
+					BaseFile: model.BaseFile{
+						FileName:  fileName,
+						Installed: true,
+						S3Key:     s3Key,
+					},
+				})
+			}
 		}
 
 		_, err = bm.s3Client.PutObject(ctx, &s3.PutObjectInput{
@@ -137,19 +163,7 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		log.Infof("successfully backed up %s to s3://%s/%s", file, os.Getenv("BUCKET_NAME"), s3Key)
 	}
 
-	// Finally update cognito with the fact that the user now has n files backed up from their pvc. i.e. the files
-	// are already installed on the pvc
-	log.Infof("merging: %d synced s3 backup files with cognito user attributes", len(dbFiles))
-	installedFiles := make(map[string]bool)
-	for _, f := range dbFiles {
-		installedFiles[f] = true
-	}
-
-	err = bm.cognito.UpdateInstalledFiles(ctx, user, installedFiles)
-	if err != nil {
-		log.Errorf("failed to update cognito with installed files (backup): %v", err)
-	}
-
+	bm.wrapper.DB.Save(&dbUser)
 	return nil
 }
 
@@ -364,7 +378,7 @@ func (bm *BackupManager) Start() {
 			case <-bm.stopPodStatusChan:
 				return
 			case <-ticker.C:
-				ready := CheckContainerStatus(bm.kubeClient)
+				ready := CheckContainerStatus(bm.wrapper.KubeClient)
 				if ready {
 					content, err := os.ReadFile(serverLogsPath)
 					if err != nil {
@@ -375,7 +389,7 @@ func (bm *BackupManager) Start() {
 					log.Infof("container ready with join code: %s", code)
 
 					// Notifies the frontend about the join code
-					err = bm.rabbitMQManager.PublishMessage(&Message{
+					err = bm.wrapper.RabbitMQClient.PublishMessage(&Message{
 						Type:      "JoinCode",
 						Body:      fmt.Sprintf(`{"joinCode": "%s", "containerName": "valheim-%s", "containerType": "server", "operation": ""}`, code, bm.TenantDiscordId),
 						DiscordId: bm.TenantDiscordId,
@@ -386,7 +400,7 @@ func (bm *BackupManager) Start() {
 					}
 
 					// Notifies the frontend that it can move the server status to ready
-					err = bm.rabbitMQManager.PublishMessage(&Message{
+					err = bm.wrapper.RabbitMQClient.PublishMessage(&Message{
 						Type:      "ContainerReady",
 						Body:      fmt.Sprintf(`{"containerName": "valheim-%s", "containerType": "server", "operation": ""}`, bm.TenantDiscordId),
 						DiscordId: bm.TenantDiscordId,

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/cbartram/hearthhub-common/model"
 	"github.com/cbartram/hearthhub-sidecar/cmd"
 	log "github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
@@ -55,6 +56,8 @@ func main() {
 		log.Errorf("error creating Metrics client: %v", err)
 	}
 
+	db := model.Connect()
+
 	// Ensure only 1 instance of this exists for all go routines because they are all coming from the same ip (this pod).
 	// This holds a reference to a channel to publish messages and all messages must be published on this channel.
 	// Trying to open other channels will result in no message being sent and no errors being thrown.
@@ -62,6 +65,13 @@ func main() {
 	if err != nil {
 		log.Errorf("failed to make rabbitmq manager: %v", err)
 		return
+	}
+
+	w := &cmd.ServiceWrapper{
+		KubeClient:     clientset,
+		MetricsClient:  metricsClient,
+		RabbitMQClient: rabbit,
+		DB:             db,
 	}
 
 	defer rabbit.Channel.Close()
@@ -76,13 +86,13 @@ func main() {
 
 	if mode == "backup" {
 		log.Infof("backup mode specified")
-		StartBackups(clientset, metricsClient, rabbit, token, maxBackups)
+		StartBackups(w, token, maxBackups)
 	} else if mode == "publish" {
 		log.Infof("publish mode specified")
 		Publish(clientset, rabbit, messageType)
 	} else {
 		log.Infof("no -mode specified defaulting to: backup")
-		StartBackups(clientset, metricsClient, rabbit, token, maxBackups)
+		StartBackups(w, token, maxBackups)
 	}
 
 	log.Infof("closing rabbitmq channel")
@@ -116,29 +126,28 @@ func Publish(clientset *kubernetes.Clientset, rabbit *cmd.RabbitMQManager, messa
 }
 
 // StartBackups Starts the backup process to S3.
-func StartBackups(clientset *kubernetes.Clientset, metricsClient *metrics.Clientset, rabbit *cmd.RabbitMQManager, token string, maxBackups int) {
+func StartBackups(w *cmd.ServiceWrapper, token string, maxBackups int) {
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
 		log.Fatalf("unable to load AWS SDK config: %v", err)
 	}
 
 	log.Info("Starting Valheim server backup sidecar")
-
 	s3Client := cmd.MakeS3Client(cfg)
 	cognito := cmd.MakeCognitoService(cfg)
 
-	backupManager, err := cmd.NewBackupManager(s3Client, clientset, cognito, rabbit, token, "/root/.config/unity3d/IronGate/Valheim/worlds_local", maxBackups)
+	backupManager, err := cmd.NewBackupManager(w, s3Client, cognito, token, "/root/.config/unity3d/IronGate/Valheim/worlds_local", maxBackups)
 	if err != nil {
 		log.Fatalf("Failed to create backup manager: %v", err)
 	}
 
-	collector, err := cmd.MakeMetricsCollector(clientset, metricsClient, rabbit, backupManager.TenantDiscordId)
+	collector, err := cmd.MakeMetricsCollector(w, backupManager.TenantDiscordId)
 	if err != nil {
 		log.Errorf("failed to make metrics collector: %v", err)
 		return
 	}
 
-	logCollector, err := cmd.MakeLogsCollector(rabbit, backupManager.TenantDiscordId)
+	logCollector, err := cmd.MakeLogsCollector(w.RabbitMQClient, backupManager.TenantDiscordId)
 	if err != nil {
 		log.Errorf("failed to make log collector: %v", err)
 		return

@@ -43,12 +43,12 @@ type MetricsCollector struct {
 	collectionFrequency time.Duration
 }
 
-func MakeMetricsCollector(kubeClient kubernetes.Interface, metricsClient *metrics.Clientset, rabbit *RabbitMQManager, discordId string) (*MetricsCollector, error) {
+func MakeMetricsCollector(w *ServiceWrapper, discordId string) (*MetricsCollector, error) {
 	return &MetricsCollector{
-		rabbitMqManager:     rabbit,
-		kubeClient:          kubeClient,
+		rabbitMqManager:     w.RabbitMQClient,
+		kubeClient:          w.KubeClient,
 		tenantDiscordId:     discordId,
-		metricsClient:       *metricsClient,
+		metricsClient:       *w.MetricsClient,
 		wg:                  sync.WaitGroup{},
 		collectionFrequency: time.Second * 10,
 	}, nil

@@ -4,13 +4,22 @@ import (
 	"context"
 	"fmt"
 	log "github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
+
+type ServiceWrapper struct {
+	KubeClient     *kubernetes.Clientset
+	MetricsClient  *metrics.Clientset
+	RabbitMQClient *RabbitMQManager
+	DB             *gorm.DB
+}
 
 // GetPodLabel retrieves a label from a pod given the label key. Returns "" if no label can be found or
 // an error occurs.
@@ -85,8 +94,8 @@ func GetWorldName(clientset kubernetes.Interface, discordId string) (string, err
 	return worldName, nil
 }
 
-// FindWorldFiles Recursively locates the *.fwl and *.db files on the PVC.
-func FindWorldFiles(dir string) ([]string, error) {
+// FindFiles Recursively locates the *.fwl and *.db files which are backups on the PVC.
+func FindFiles(dir string) ([]string, error) {
 	var worldFiles []string
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
