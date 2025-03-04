@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/cbartram/hearthhub-common/model"
 	log "github.com/sirupsen/logrus"
+	"gorm.io/gorm/clause"
 	"os"
 	"path/filepath"
 	"sort"
@@ -101,26 +102,26 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		log.Errorf("failed to fetch user from db: %v", tx.Error)
 		return err
 	}
-	// TODO Handle multiple servers here
-	serverId := user.Servers[0].ID
+
 	user.BackupFiles = []model.BackupFile{}
 	user.WorldFiles = []model.WorldFile{}
 
 	for _, file := range files {
-		fileName := filepath.Base(file)
-		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, fileName)
-		fileData, err := os.Open(file)
+		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, file.Name)
+		fileData, err := os.Open(file.Path)
 		if err != nil {
 			log.Infof("Failed to open file %s: %v", file, err)
 			continue
 		}
 		defer fileData.Close()
 
-		if strings.HasSuffix(fileName, ".db") {
-			if strings.Contains(fileName, "_backup_auto-") {
+		if strings.HasSuffix(file.Name, ".db") {
+			if file.IsBackup {
 				user.BackupFiles = append(user.BackupFiles, model.BackupFile{
 					BaseFile: model.BaseFile{
-						FileName:  fileName,
+						UserID:    user.ID,
+						Size:      file.Size,
+						FileName:  file.Name,
 						Installed: true,
 						S3Key:     s3Key,
 					},
@@ -128,11 +129,12 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 			} else {
 				user.WorldFiles = append(user.WorldFiles, model.WorldFile{
 					BaseFile: model.BaseFile{
-						FileName:  fileName,
+						UserID:    user.ID,
+						Size:      file.Size,
+						FileName:  file.Name,
 						Installed: true,
 						S3Key:     s3Key,
 					},
-					ServerID: serverId,
 				})
 			}
 		}
@@ -148,6 +150,8 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 			log.Errorf("failed to upload backup %s to S3: %v", file, err)
 			return err
 		}
+
+		bm.PersistFiles(user.WorldFiles, user.BackupFiles)
 
 		log.Infof("successfully backed up %s to s3://%s/%s", file, os.Getenv("BUCKET_NAME"), s3Key)
 	}
@@ -292,8 +296,21 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		}
 
 		// Also make sure to delete this file from the pvc or it will just get re-uploaded to s3
-		localFile := fmt.Sprintf("%s/%s", bm.sourceDir, filepath.Base(file))
+		name := filepath.Base(file)
+		localFile := fmt.Sprintf("%s/%s", bm.sourceDir, name)
 		os.Remove(localFile)
+
+		if strings.Contains(name, "_backup_auto-") {
+			tx := bm.wrapper.DB.Where("file_name = ?", name).Delete(&model.BackupFile{})
+			if tx.Error != nil {
+				log.Errorf("failed to delete backup file: %v", tx.Error)
+			}
+		} else {
+			tx := bm.wrapper.DB.Where("file_name = ?", name).Delete(&model.WorldFile{})
+			if tx.Error != nil {
+				log.Errorf("failed to delete world file: %v", tx.Error)
+			}
+		}
 
 		log.Infof("deleted s3 file: %s and local file: %s", file, localFile)
 	}
@@ -305,41 +322,58 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		return err
 	}
 
-	serverId := user.Servers[0].ID
-	user.BackupFiles = []model.BackupFile{}
-	user.WorldFiles = []model.WorldFile{}
-
 	files, _ := FindFiles(bm.sourceDir)
 	for _, file := range files {
-		filename := filepath.Base(file)
-
-		if !strings.Contains(filename, worldName) || !strings.HasSuffix(filename, ".db") {
+		if !strings.Contains(file.Name, worldName) || !strings.HasSuffix(file.Name, ".db") {
 			continue
 		}
 
-		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, filename)
-		if strings.Contains(filename, "_backup_auto-") {
+		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, file.Name)
+		if file.IsBackup {
 			user.BackupFiles = append(user.BackupFiles, model.BackupFile{
 				BaseFile: model.BaseFile{
-					FileName:  filename,
+					UserID:    user.ID,
+					Size:      file.Size,
+					FileName:  file.Name,
 					Installed: true,
 					S3Key:     s3Key,
 				},
 			})
-		} else if filename == (worldName + ".db") {
+		} else if file.Name == (worldName + ".db") {
 			user.WorldFiles = append(user.WorldFiles, model.WorldFile{
 				BaseFile: model.BaseFile{
-					FileName:  filename,
+					UserID:    user.ID,
+					FileName:  file.Name,
+					Size:      file.Size,
 					Installed: true,
 					S3Key:     s3Key,
 				},
-				ServerID: serverId,
 			})
 		}
 	}
 
+	bm.PersistFiles(user.WorldFiles, user.BackupFiles)
 	bm.wrapper.DB.Save(&user)
 	return nil
+}
+
+func (bm *BackupManager) PersistFiles(worldFiles []model.WorldFile, backupFiles []model.BackupFile) {
+	col := []clause.Column{{Name: "file_name"}}
+	doUpdate := clause.AssignmentColumns([]string{"installed", "size"})
+
+	for _, file := range worldFiles {
+		bm.wrapper.DB.Clauses(clause.OnConflict{
+			Columns:   col,
+			DoUpdates: doUpdate,
+		}).Create(&file)
+	}
+
+	for _, file := range backupFiles {
+		bm.wrapper.DB.Clauses(clause.OnConflict{
+			Columns:   col,
+			DoUpdates: doUpdate,
+		}).Create(&file)
+	}
 }
 
 // Start Starts a ticker based on the configured backup frequency to perform backups of world files

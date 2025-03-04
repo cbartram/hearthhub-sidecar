@@ -21,6 +21,13 @@ type ServiceWrapper struct {
 	DB             *gorm.DB
 }
 
+type ValheimSaveFile struct {
+	Path     string
+	Name     string
+	Size     int64
+	IsBackup bool
+}
+
 // GetPodLabel retrieves a label from a pod given the label key. Returns "" if no label can be found or
 // an error occurs.
 func GetPodLabel(clientset kubernetes.Interface, labelKey string) (string, error) {
@@ -95,8 +102,8 @@ func GetWorldName(clientset kubernetes.Interface, discordId string) (string, err
 }
 
 // FindFiles Recursively locates the *.fwl and *.db files which are backups on the PVC.
-func FindFiles(dir string) ([]string, error) {
-	var worldFiles []string
+func FindFiles(dir string) ([]ValheimSaveFile, error) {
+	var worldFiles []ValheimSaveFile
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -106,7 +113,12 @@ func FindFiles(dir string) ([]string, error) {
 		if !info.IsDir() {
 			ext := filepath.Ext(path)
 			if ext == ".fwl" || ext == ".db" {
-				worldFiles = append(worldFiles, path)
+				worldFiles = append(worldFiles, ValheimSaveFile{
+					Path:     path,
+					Name:     info.Name(),
+					Size:     info.Size(),
+					IsBackup: strings.Contains(info.Name(), "_backup_auto-"),
+				})
 			}
 		}
 
