@@ -48,14 +48,11 @@ type BackupManager struct {
 	backupFrequency   time.Duration
 	TenantDiscordId   string
 	maxBackups        int
-	lastCleanupMu     sync.Mutex
-	lastCleanupTime   time.Time
-	cleanupFrequency  time.Duration
 }
 
 func NewBackupManager(w *ServiceWrapper, s3Client *S3Client, token, discordId, sourceDir string, maxBackups int) (*BackupManager, error) {
 	backupFrequency := os.Getenv("BACKUP_FREQUENCY_MIN")
-	var backupFrequencyDuration, cleanupFrequencyDuration time.Duration
+	var backupFrequencyDuration time.Duration
 
 	if backupFrequency == "" {
 		backupFrequencyDuration = 10 * time.Minute
@@ -69,7 +66,7 @@ func NewBackupManager(w *ServiceWrapper, s3Client *S3Client, token, discordId, s
 		backupFrequencyDuration = time.Duration(backupFreqInt) * time.Minute
 	}
 
-	log.Infof("tenant id: %s, backups occur every: %v, cleanups occur every: %v", discordId, backupFrequencyDuration, cleanupFrequencyDuration)
+	log.Infof("tenant id: %s, backups and cleanups occur every: %v", discordId, backupFrequencyDuration)
 
 	return &BackupManager{
 		s3Client:          s3Client,
@@ -81,8 +78,6 @@ func NewBackupManager(w *ServiceWrapper, s3Client *S3Client, token, discordId, s
 		lastBackupTime:    time.Time{},
 		backupFrequency:   backupFrequencyDuration,
 		TenantDiscordId:   discordId,
-		lastCleanupTime:   time.Time{},
-		cleanupFrequency:  backupFrequencyDuration,
 		maxBackups:        maxBackups,
 	}, nil
 }
@@ -144,11 +139,10 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 			return err
 		}
 
-		bm.PersistFiles(user.WorldFiles, user.BackupFiles)
-
 		log.Infof("successfully backed up %s (is_backup: %t) to s3://%s/%s", file.Name, file.IsBackup, os.Getenv("BUCKET_NAME"), s3Key)
 	}
 
+	bm.PersistFiles(user.WorldFiles, user.BackupFiles)
 	bm.wrapper.DB.Save(&user)
 	return nil
 }
@@ -322,25 +316,20 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 		}
 
 		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, file.Name)
+		baseFile := model.BaseFile{
+			UserID:    user.ID,
+			Size:      file.Size,
+			FileName:  file.Name,
+			Installed: true,
+			S3Key:     s3Key,
+		}
 		if file.IsBackup {
 			user.BackupFiles = append(user.BackupFiles, model.BackupFile{
-				BaseFile: model.BaseFile{
-					UserID:    user.ID,
-					Size:      file.Size,
-					FileName:  file.Name,
-					Installed: true,
-					S3Key:     s3Key,
-				},
+				BaseFile: baseFile,
 			})
 		} else if file.Name == (worldName + ".db") {
 			user.WorldFiles = append(user.WorldFiles, model.WorldFile{
-				BaseFile: model.BaseFile{
-					UserID:    user.ID,
-					FileName:  file.Name,
-					Size:      file.Size,
-					Installed: true,
-					S3Key:     s3Key,
-				},
+				BaseFile: baseFile,
 			})
 		}
 	}
@@ -377,6 +366,9 @@ func (bm *BackupManager) PersistFiles(worldFiles []model.WorldFile, backupFiles 
 func (bm *BackupManager) Start() {
 	log.Infof("starting backup manager go-routines")
 	bm.wg.Add(3)
+
+	// Start a backup immediately on pod start before the go-routine kicks in
+	bm.PerformPeriodicBackup()
 
 	// Backup Goroutine
 	go func() {
