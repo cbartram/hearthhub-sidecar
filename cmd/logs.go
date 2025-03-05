@@ -29,7 +29,7 @@ func MakeLogsCollector(rabbit *RabbitMQManager, discordId string) (*LogsCollecto
 		rabbitMqManager:     rabbit,
 		tenantDiscordId:     discordId,
 		wg:                  sync.WaitGroup{},
-		collectionFrequency: time.Second * 3, // TODO Possibly too intense so keep this in check
+		collectionFrequency: time.Second * 3,
 	}, nil
 }
 
