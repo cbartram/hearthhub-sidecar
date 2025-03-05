@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.29.8
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.78.0
 	github.com/aws/smithy-go v1.22.3
-	github.com/cbartram/hearthhub-common v0.0.0-20250304170003-34e9da077982
+	github.com/cbartram/hearthhub-common v0.0.0-20250304181405-9ec503495dc9
 	github.com/pkg/errors v0.9.1
 	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/sirupsen/logrus v1.9.3
