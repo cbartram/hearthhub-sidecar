@@ -103,9 +103,6 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		return err
 	}
 
-	user.BackupFiles = []model.BackupFile{}
-	user.WorldFiles = []model.WorldFile{}
-
 	for _, file := range files {
 		s3Key := fmt.Sprintf("%s/%s/%s", backupPrefix, bm.TenantDiscordId, file.Name)
 		fileData, err := os.Open(file.Path)
@@ -115,26 +112,22 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 		}
 		defer fileData.Close()
 
+		log.Infof("checking file for s3 persist: %s, is backup: %v", file.Name, file.IsBackup)
 		if strings.HasSuffix(file.Name, ".db") {
+			baseFile := model.BaseFile{
+				UserID:    user.ID,
+				Size:      file.Size,
+				FileName:  file.Name,
+				Installed: true,
+				S3Key:     s3Key,
+			}
 			if file.IsBackup {
 				user.BackupFiles = append(user.BackupFiles, model.BackupFile{
-					BaseFile: model.BaseFile{
-						UserID:    user.ID,
-						Size:      file.Size,
-						FileName:  file.Name,
-						Installed: true,
-						S3Key:     s3Key,
-					},
+					BaseFile: baseFile,
 				})
 			} else {
 				user.WorldFiles = append(user.WorldFiles, model.WorldFile{
-					BaseFile: model.BaseFile{
-						UserID:    user.ID,
-						Size:      file.Size,
-						FileName:  file.Name,
-						Installed: true,
-						S3Key:     s3Key,
-					},
+					BaseFile: baseFile,
 				})
 			}
 		}
@@ -153,7 +146,7 @@ func (bm *BackupManager) BackupWorldSaves(ctx context.Context) error {
 
 		bm.PersistFiles(user.WorldFiles, user.BackupFiles)
 
-		log.Infof("successfully backed up %s to s3://%s/%s", file, os.Getenv("BUCKET_NAME"), s3Key)
+		log.Infof("successfully backed up %s (is_backup: %t) to s3://%s/%s", file.Name, file.IsBackup, os.Getenv("BUCKET_NAME"), s3Key)
 	}
 
 	bm.wrapper.DB.Save(&user)
@@ -360,6 +353,8 @@ func (bm *BackupManager) Cleanup(ctx context.Context) error {
 func (bm *BackupManager) PersistFiles(worldFiles []model.WorldFile, backupFiles []model.BackupFile) {
 	col := []clause.Column{{Name: "file_name"}}
 	doUpdate := clause.AssignmentColumns([]string{"installed", "size"})
+
+	log.Infof("persisting %d world files and %d backup files to db", len(worldFiles), len(backupFiles))
 
 	for _, file := range worldFiles {
 		bm.wrapper.DB.Clauses(clause.OnConflict{
